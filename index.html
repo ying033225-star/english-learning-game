@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>英语大冒险 - English Adventure</title>
+    <link rel="stylesheet" href="css/game.css?v=16">
+</head>
+<body>
+    <div id="game-container"></div>
+    <div id="version-badge" style="position:fixed;top:0;left:0;background:#ff0;color:#000;padding:2px 8px;font:12px Arial;z-index:9999;">v16</div>
+
+    <!-- Phaser 3 from CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+
+    <!-- Game systems -->
+    <script src="js/systems/AudioManager.js?v=16"></script>
+    <script src="js/systems/QuizManager.js?v=16"></script>
+    <script src="js/systems/ProgressManager.js?v=16"></script>
+
+    <!-- Game data -->
+    <script src="js/data/units.js?v=16"></script>
+    <script src="js/data/levels.js?v=16"></script>
+
+    <!-- Game entities -->
+    <script src="js/entities/Boss.js?v=16"></script>
+    <script src="js/entities/Player.js?v=16"></script>
+    <script src="js/entities/QuestionBlock.js?v=16"></script>
+    <script src="js/entities/Coin.js?v=16"></script>
+    <script src="js/entities/Enemy.js?v=16"></script>
+
+    <!-- Game scenes -->
+    <script src="js/scenes/BootScene.js?v=16"></script>
+    <script src="js/scenes/MenuScene.js?v=16"></script>
+    <script src="js/scenes/WorldSelectScene.js?v=16"></script>
+    <script src="js/scenes/GameScene.js?v=16"></script>
+    <script src="js/scenes/QuestionUI.js?v=16"></script>
+    <script src="js/scenes/ResultScene.js?v=16"></script>
+
+    <!-- Boot -->
+    <script src="js/boot.js?v=16"></script>
+</body>
+</html>

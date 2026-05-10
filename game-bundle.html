@@ -1,0 +1,3542 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>英语大冒险 - English Adventure</title>
+    <style>
+*{margin:0;padding:0;box-sizing:border-box}html,body{width:100%;height:100%;overflow:hidden;background:#1a1a2e}#game-container{width:100%;height:100%;display:flex;justify-content:center;align-items:center}#game-container canvas{image-rendering:pixelated;image-rendering:crisp-edges}
+    </style>
+</head>
+<body>
+    <div id="game-container"></div>
+    <div id="version-badge" style="position:fixed;top:0;left:0;background:#0f0;color:#000;padding:2px 8px;font:12px Arial;z-index:9999;">v16</div>
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+    <script>
+class AudioManager {
+    constructor() {
+        // TTS
+        this.synth = window.speechSynthesis || null;
+        this.voice = null;
+        this.speaking = false;
+        if (this.synth) {
+            try { this.initVoice(); } catch (e) { /* ignore */ }
+        }
+
+        // Speech Recognition
+        this.recognition = null;
+        this.recognitionSupported = false;
+        try { this.initRecognition(); } catch (e) { /* ignore */ }
+
+        // Sound Effects via Web Audio API
+        this.audioCtx = null;
+        this.sfxEnabled = false;
+        try { this.initAudioContext(); } catch (e) { /* ignore */ }
+    }
+
+    // ==================== TTS ====================
+
+    initVoice() {
+        const loadVoices = () => {
+            const voices = this.synth.getVoices();
+            if (voices.length === 0) return;
+            this.voice = voices.find(v => v.lang.startsWith('en') && v.name.includes('Female'))
+                || voices.find(v => v.lang.startsWith('en-US'))
+                || voices.find(v => v.lang.startsWith('en'))
+                || voices[0];
+        };
+        loadVoices();
+        if (this.synth.onvoiceschanged !== undefined) {
+            this.synth.onvoiceschanged = loadVoices;
+        }
+
+        // Warm up speech synthesis on first user click
+        const warmUp = () => {
+            if (!this.voice) loadVoices();
+            // Speak a silent utterance to activate audio context
+            const u = new SpeechSynthesisUtterance('');
+            u.volume = 0;
+            u.rate = 2;
+            this.synth.speak(u);
+            document.removeEventListener('click', warmUp);
+            document.removeEventListener('keydown', warmUp);
+        };
+        document.addEventListener('click', warmUp, { once: true });
+        document.addEventListener('keydown', warmUp, { once: true });
+    }
+
+    speak(text, rate = 0.85, pitch = 1.3) {
+        if (!this.synth) return false;
+
+        // Reload voices on every call (they load async on Mac)
+        const voices = this.synth.getVoices();
+        if (voices.length > 0) {
+            // Prefer cute/higher-pitched voices: Samantha (Mac), Google female, Zira (Win)
+            this.voice = voices.find(v => v.name.includes('Samantha'))
+                || voices.find(v => v.name.includes('Google') && v.name.includes('Female'))
+                || voices.find(v => v.name.includes('Zira'))
+                || voices.find(v => v.lang.startsWith('en-US') && v.name.includes('Female'))
+                || voices.find(v => v.lang.startsWith('en-US'))
+                || voices.find(v => v.lang.startsWith('en'))
+                || voices[0];
+        }
+
+        this.synth.cancel();
+        const utterance = new SpeechSynthesisUtterance(text);
+        if (this.voice) utterance.voice = this.voice;
+        utterance.rate = rate;
+        utterance.pitch = pitch;
+        utterance.volume = 1.0;
+
+        this.speaking = true;
+        utterance.onend = () => { this.speaking = false; };
+        utterance.onerror = () => {
+            this.speaking = false;
+            // Retry once without voice on any error
+            if (this.voice) {
+                this.voice = null;
+                this.synth.cancel();
+                const retry = new SpeechSynthesisUtterance(text);
+                retry.rate = rate;
+                retry.pitch = pitch;
+                retry.volume = 1.0;
+                retry.onend = () => { this.speaking = false; };
+                retry.onerror = () => { this.speaking = false; };
+                this.synth.speak(retry);
+            }
+        };
+
+        this.synth.speak(utterance);
+        return true;
+    }
+
+    speakWord(word) {
+        this.speak(word, 0.8, 1.4);
+    }
+
+    speakSentence(sentence) {
+        this.speak(sentence, 0.8, 1.2);
+    }
+
+    stop() {
+        if (this.synth) {
+            this.synth.cancel();
+            this.speaking = false;
+        }
+    }
+
+    // ==================== Speech Recognition (跟读) ====================
+
+    initRecognition() {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+            this.recognitionSupported = false;
+            return;
+        }
+
+        this.recognition = new SpeechRecognition();
+        this.recognition.lang = 'en-US';
+        this.recognition.interimResults = false;
+        this.recognition.maxAlternatives = 3;
+        this.recognitionSupported = true;
+    }
+
+    listenAndCompare(targetText, onResult) {
+        if (!this.recognitionSupported) {
+            // Fallback: show alert that device doesn't support
+            onResult({ success: false, reason: 'not_supported', message: '你的浏览器不支持语音识别，请使用Chrome浏览器并在localhost或HTTPS下打开' });
+            return;
+        }
+
+        this.recognition.onresult = (event) => {
+            const results = event.results[0];
+            const transcripts = [];
+            for (let i = 0; i < results.length; i++) {
+                transcripts.push(results[i].transcript.toLowerCase().trim());
+            }
+
+            const target = targetText.toLowerCase().trim().replace(/[^a-z0-9\s]/g, '');
+            const bestMatch = transcripts[0] || '';
+            const similarity = this.calculateSimilarity(bestMatch.replace(/[^a-z0-9\s]/g, ''), target);
+
+            const passed = similarity >= 0.6;
+            onResult({
+                success: true,
+                passed: passed,
+                similarity: similarity,
+                transcript: bestMatch,
+                target: targetText,
+                message: passed
+                    ? `很棒! 相似度: ${Math.round(similarity * 100)}%`
+                    : `再试一次~ 你说的是: "${bestMatch}" 相似度: ${Math.round(similarity * 100)}%`
+            });
+        };
+
+        this.recognition.onerror = (event) => {
+            onResult({ success: false, reason: event.error, message: `语音识别出错: ${event.error}` });
+        };
+
+        this.recognition.onnomatch = () => {
+            onResult({ success: false, reason: 'no_match', message: '没有识别到语音，请再试一次' });
+        };
+
+        try {
+            this.recognition.start();
+        } catch (e) {
+            onResult({ success: false, reason: 'error', message: '语音识别启动失败' });
+        }
+    }
+
+    stopListening() {
+        if (this.recognition) {
+            try { this.recognition.stop(); } catch (e) { /* ignore */ }
+        }
+    }
+
+    calculateSimilarity(a, b) {
+        if (!a || !b) return 0;
+        if (a === b) return 1;
+
+        // Simple word-level similarity
+        const wordsA = a.split(/\s+/);
+        const wordsB = b.split(/\s+/);
+        let matches = 0;
+        const setB = new Set(wordsB);
+        for (const w of wordsA) {
+            if (setB.has(w)) matches++;
+        }
+
+        const total = Math.max(wordsA.length, wordsB.length);
+        return total > 0 ? matches / total : 0;
+    }
+
+    // ==================== Sound Effects ====================
+
+    initAudioContext() {
+        try {
+            this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            this.sfxEnabled = true;
+        } catch (e) {
+            this.sfxEnabled = false;
+        }
+    }
+
+    ensureContext() {
+        if (this.audioCtx && this.audioCtx.state === 'suspended') {
+            this.audioCtx.resume();
+        }
+    }
+
+    // Play a simple tone
+    playTone(freq, duration, type = 'sine', volume = 0.3) {
+        if (!this.sfxEnabled || !this.audioCtx) return;
+        this.ensureContext();
+
+        const osc = this.audioCtx.createOscillator();
+        const gain = this.audioCtx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, this.audioCtx.currentTime);
+        gain.gain.setValueAtTime(volume, this.audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, this.audioCtx.currentTime + duration);
+        osc.connect(gain);
+        gain.connect(this.audioCtx.destination);
+        osc.start(this.audioCtx.currentTime);
+        osc.stop(this.audioCtx.currentTime + duration);
+    }
+
+    sfxJump() {
+        this.playTone(400, 0.1, 'square', 0.15);
+        setTimeout(() => this.playTone(600, 0.08, 'square', 0.1), 50);
+    }
+
+    sfxCoin() {
+        this.playTone(988, 0.08, 'square', 0.2);
+        setTimeout(() => this.playTone(1319, 0.15, 'square', 0.2), 80);
+    }
+
+    sfxCorrect() {
+        this.playTone(523, 0.1, 'sine', 0.25);
+        setTimeout(() => this.playTone(659, 0.1, 'sine', 0.25), 100);
+        setTimeout(() => this.playTone(784, 0.2, 'sine', 0.25), 200);
+    }
+
+    sfxWrong() {
+        this.playTone(200, 0.2, 'sawtooth', 0.2);
+        setTimeout(() => this.playTone(150, 0.3, 'sawtooth', 0.15), 150);
+    }
+
+    sfxLevelComplete() {
+        const notes = [523, 659, 784, 1047];
+        notes.forEach((freq, i) => {
+            setTimeout(() => this.playTone(freq, 0.2, 'sine', 0.25), i * 150);
+        });
+    }
+
+    sfxHit() {
+        this.playTone(300, 0.08, 'triangle', 0.2);
+    }
+
+    sfxStomp() {
+        this.playTone(200, 0.1, 'square', 0.3);
+        setTimeout(() => this.playTone(100, 0.15, 'square', 0.2), 50);
+    }
+}
+
+let audioManager;
+class QuizManager {
+    constructor(unitData) {
+        this.unitData = unitData;
+        this.wrongAnswers = this.loadWrongAnswers();
+        this.usedQuestions = [];
+    }
+
+    generateQuestion(type) {
+        if (!this.unitData) {
+            return this.fallbackQuestion();
+        }
+
+        let question;
+        switch (type) {
+            case 'vocabulary':
+                question = this.generateVocabQuestion();
+                break;
+            case 'listening':
+                question = this.generateListeningQuestion();
+                break;
+            case 'sentence':
+                question = this.generateSentenceQuestion();
+                break;
+            case 'grammar':
+                question = this.generateGrammarQuestion();
+                break;
+            case 'phonics':
+                question = this.generatePhonicsQuestion();
+                break;
+            default:
+                question = this.generateVocabQuestion();
+        }
+
+        // Mix in review question occasionally (30% chance if reviews available)
+        if (Math.random() < 0.3) {
+            const reviews = this.getReviewQuestions(1);
+            if (reviews.length > 0) {
+                const rd = reviews[0].data;
+                if (rd && rd.type && rd.question && Array.isArray(rd.choices) && rd.correctIndex !== undefined) {
+                    question = rd;
+                    question.isReview = true;
+                }
+            }
+        }
+
+        return question;
+    }
+
+    generateVocabQuestion() {
+        const vocab = [...this.unitData.vocabulary];
+        const correct = Phaser.Math.Between(0, vocab.length - 1);
+        const correctWord = vocab[correct];
+
+        // Pick 3 wrong options
+        const wrongs = vocab.filter((_, i) => i !== correct)
+            .sort(() => Math.random() - 0.5)
+            .slice(0, 3);
+
+        // Randomly choose direction: en→cn or cn→en
+        const showEn = Math.random() > 0.5;
+
+        const choices = [correctWord, ...wrongs].sort(() => Math.random() - 0.5);
+        const correctIndex = choices.indexOf(correctWord);
+
+        return {
+            type: 'vocabulary',
+            question: showEn ? correctWord.en : correctWord.cn,
+            questionSub: showEn ? `/${correctWord.phonetic}/` : '',
+            hint: showEn ? '选择中文意思' : '选择对应的英文',
+            choices: choices.map(c => showEn ? c.cn : c.en),
+            correctIndex: correctIndex,
+            correctAnswer: showEn ? correctWord.cn : correctWord.en,
+            audioText: correctWord.en,
+            explain: `${correctWord.en} = ${correctWord.cn}`,
+            isReview: false
+        };
+    }
+
+    generateListeningQuestion() {
+        const vocab = [...this.unitData.vocabulary];
+        const correct = Phaser.Math.Between(0, vocab.length - 1);
+        const correctWord = vocab[correct];
+
+        const wrongs = vocab.filter((_, i) => i !== correct)
+            .sort(() => Math.random() - 0.5)
+            .slice(0, 3);
+
+        const choices = [correctWord, ...wrongs].sort(() => Math.random() - 0.5);
+        const correctIndex = choices.indexOf(correctWord);
+
+        return {
+            type: 'listening',
+            question: '听发音，选择对应的单词',
+            questionSub: '点击喇叭重复播放',
+            hint: '仔细听发音哦~',
+            choices: choices.map(c => c.en),
+            correctIndex: correctIndex,
+            correctAnswer: correctWord.en,
+            audioText: correctWord.en,
+            explain: `${correctWord.en} ${correctWord.phonetic} = ${correctWord.cn}`,
+            isReview: false
+        };
+    }
+
+    generateSentenceQuestion() {
+        const sentences = [...this.unitData.sentences];
+        const sentence = sentences[Phaser.Math.Between(0, sentences.length - 1)];
+
+        // Split into words, strip punctuation and lowercase for clean display
+        const rawWords = sentence.en.split(' ');
+        const words = rawWords.map(w => w.replace(/[.,!?;:'"]/g, '').toLowerCase());
+        const shuffled = [...words].sort(() => Math.random() - 0.5);
+
+        return {
+            type: 'sentence',
+            question: `连词成句：${sentence.cn}`,
+            questionSub: '',
+            hint: '把单词排成正确的句子（点击单词放置，点击已放单词可修改）',
+            choices: shuffled,
+            correctOrder: words,
+            correctIndex: 0,
+            correctAnswer: sentence.en,
+            audioText: sentence.en,
+            explain: `${sentence.en}\n${sentence.cn}`,
+            isReview: false
+        };
+    }
+
+    generateGrammarQuestion() {
+        const grammar = this.unitData.grammar;
+        if (!grammar || !grammar.quizOptions) {
+            return this.generateVocabQuestion();
+        }
+
+        const entries = Object.entries(grammar.quizOptions);
+        const entry = entries[Phaser.Math.Between(0, entries.length - 1)];
+        const [question, options] = entry;
+
+        // The correct answer should be among the options
+        // For simplicity, assume first option is correct
+        const correctIndex = 0;
+        const shuffled = [...options].sort(() => Math.random() - 0.5);
+
+        return {
+            type: 'grammar',
+            question: question,
+            questionSub: '选择正确的答案填空',
+            hint: `语法点：${grammar.title}`,
+            choices: shuffled,
+            correctIndex: shuffled.indexOf(options[0]),
+            correctAnswer: options[0],
+            audioText: question.replace('___', options[0]),
+            explain: `正确：${question.replace('___', options[0])}`,
+            isReview: false
+        };
+    }
+
+    generatePhonicsQuestion() {
+        const phonics = this.unitData.phonics;
+        if (!phonics || !phonics.words || phonics.words.length === 0) {
+            return this.generateVocabQuestion();
+        }
+
+        const correct = phonics.words[Phaser.Math.Between(0, phonics.words.length - 1)];
+        if (!correct || !correct.en) return this.generateVocabQuestion();
+
+        // Pick wrong words from vocabulary with different sound patterns
+        const vocab = [...this.unitData.vocabulary]
+            .filter(v => v.en !== correct.en)
+            .sort(() => Math.random() - 0.5)
+            .slice(0, 3);
+
+        // Ensure minimum 2 choices
+        const choices = [correct, ...vocab].sort(() => Math.random() - 0.5);
+        const correctIndex = choices.indexOf(correct);
+
+        if (correctIndex < 0 || choices.length < 2) {
+            return this.generateVocabQuestion();
+        }
+
+        return {
+            type: 'phonics',
+            question: `哪个单词包含 ${(phonics.pattern || '').split(',')[0]}？`,
+            questionSub: `语音规律：${phonics.pattern || ''}`,
+            hint: '仔细看单词的发音',
+            choices: choices.map(c => `${c.en} ${c.phonetic || ''}`),
+            correctIndex: correctIndex,
+            correctAnswer: `${correct.en} ${correct.phonetic || ''}`,
+            audioText: correct.en,
+            explain: `${correct.en} 包含 ${(phonics.pattern || '').split(',')[0]}`,
+            isReview: false
+        };
+    }
+
+    fallbackQuestion() {
+        return {
+            type: 'vocabulary',
+            question: 'What is this?',
+            questionSub: '',
+            hint: '',
+            choices: ['A', 'B', 'C'],
+            correctIndex: 0,
+            correctAnswer: 'A',
+            audioText: 'A',
+            explain: '',
+            isReview: false
+        };
+    }
+
+    checkAnswer(question, userIndex) {
+        const correct = userIndex === question.correctIndex;
+        if (!correct) {
+            this.recordWrongAnswer(question);
+        }
+        return correct;
+    }
+
+    recordWrongAnswer(question) {
+        const key = question.question;
+        const existing = this.wrongAnswers.find(w => w.question === key);
+        if (existing) {
+            existing.count++;
+            existing.lastWrong = Date.now();
+            existing.nextReview = Date.now() + 86400000; // 1 day
+        } else {
+            this.wrongAnswers.push({
+                question: key,
+                data: { ...question, isReview: true },
+                count: 1,
+                lastWrong: Date.now(),
+                nextReview: Date.now() + 86400000
+            });
+        }
+        this.saveWrongAnswers();
+    }
+
+    getReviewQuestions(count) {
+        const now = Date.now();
+        const due = this.wrongAnswers.filter(w => w.nextReview <= now);
+        return due.slice(0, count);
+    }
+
+    getStats() {
+        return {
+            totalWrong: this.wrongAnswers.length,
+            reviewDue: this.getReviewQuestions(99).length
+        };
+    }
+
+    loadWrongAnswers() {
+        try {
+            const raw = JSON.parse(localStorage.getItem('wrongAnswers_v2') || '[]');
+            // Filter out corrupted entries
+            return raw.filter(w => w.data && w.data.type && w.data.question && Array.isArray(w.data.choices));
+        } catch {
+            return [];
+        }
+    }
+
+    saveWrongAnswers() {
+        try {
+            localStorage.setItem('wrongAnswers_v2', JSON.stringify(this.wrongAnswers));
+        } catch { /* storage full */ }
+    }
+
+    resetWrongAnswers() {
+        this.wrongAnswers = [];
+        this.saveWrongAnswers();
+    }
+}
+// ProgressManager - localStorage progress tracking
+class ProgressManager {
+    constructor() {
+        this.progress = this.loadProgress();
+    }
+
+    getDefaultProgress() {
+        return {
+            currentWorld: 1,
+            currentLevel: 1,
+            worlds: {
+                1: { unlocked: true, levels: { 1: { stars: 0, completed: false }, 2: { stars: 0, completed: false }, 3: { stars: 0, completed: false }, boss: { stars: 0, completed: false } } },
+                2: { unlocked: false, levels: { 1: { stars: 0, completed: false }, 2: { stars: 0, completed: false }, 3: { stars: 0, completed: false }, boss: { stars: 0, completed: false } } },
+                3: { unlocked: false, levels: { 1: { stars: 0, completed: false }, 2: { stars: 0, completed: false }, 3: { stars: 0, completed: false }, boss: { stars: 0, completed: false } } },
+                4: { unlocked: false, levels: { 1: { stars: 0, completed: false }, 2: { stars: 0, completed: false }, 3: { stars: 0, completed: false }, boss: { stars: 0, completed: false } } },
+                5: { unlocked: false, levels: { 1: { stars: 0, completed: false }, 2: { stars: 0, completed: false }, 3: { stars: 0, completed: false }, boss: { stars: 0, completed: false } } },
+                6: { unlocked: false, levels: { 1: { stars: 0, completed: false }, 2: { stars: 0, completed: false }, 3: { stars: 0, completed: false }, boss: { stars: 0, completed: false } } }
+            }
+        };
+    }
+
+    loadProgress() {
+        try {
+            const saved = JSON.parse(localStorage.getItem('gameProgress'));
+            return saved || this.getDefaultProgress();
+        } catch {
+            return this.getDefaultProgress();
+        }
+    }
+
+    saveProgress() {
+        try {
+            localStorage.setItem('gameProgress', JSON.stringify(this.progress));
+        } catch { /* storage full */ }
+    }
+
+    completeLevel(world, level, stars) {
+        if (!this.progress.worlds[world]) return;
+        this.progress.worlds[world].levels[level].completed = true;
+        this.progress.worlds[world].levels[level].stars = Math.max(
+            this.progress.worlds[world].levels[level].stars,
+            stars
+        );
+
+        // Unlock next level or world
+        if (level === 'boss') {
+            // Unlock next world
+            const nextWorld = world + 1;
+            if (this.progress.worlds[nextWorld]) {
+                this.progress.worlds[nextWorld].unlocked = true;
+            }
+        } else {
+            // Unlock next level
+            const nextLevel = level + 1;
+            if (this.progress.worlds[world].levels[nextLevel]) {
+                this.progress.worlds[world].levels[nextLevel].unlocked = true;
+            }
+        }
+
+        this.progress.currentWorld = world;
+        this.progress.currentLevel = level;
+        this.saveProgress();
+    }
+
+    getLevelStars(world, level) {
+        return this.progress.worlds[world]?.levels[level]?.stars || 0;
+    }
+
+    isLevelUnlocked(world, level) {
+        return this.progress.worlds[world]?.unlocked
+            && this.progress.worlds[world]?.levels[level]?.unlocked !== false;
+    }
+
+    resetProgress() {
+        this.progress = this.getDefaultProgress();
+        this.saveProgress();
+    }
+}
+
+// Global instance
+let progressManager;
+// All 6 units learning content - 新外研版四年级下册
+const UNITS = {
+    1: {
+        id: 1, title: "People at Work", titleCn: "职业", bgColor: 0x87ceeb,
+        vocabulary: [
+            { en: "doctor", cn: "医生", phonetic: "/ˈdɒktə(r)/" },
+            { en: "fireman", cn: "消防队员", phonetic: "/ˈfaɪəmən/" },
+            { en: "farmer", cn: "农民", phonetic: "/ˈfɑːmə(r)/" },
+            { en: "cook", cn: "厨师", phonetic: "/kʊk/" },
+            { en: "police officer", cn: "警察", phonetic: "/pəˈliːs ˈɒfɪsə(r)/" },
+            { en: "nurse", cn: "护士", phonetic: "/nɜːs/" },
+            { en: "driver", cn: "司机", phonetic: "/ˈdraɪvə(r)/" },
+            { en: "scientist", cn: "科学家", phonetic: "/ˈsaɪəntɪst/" },
+            { en: "painter", cn: "画家", phonetic: "/ˈpeɪntə(r)/" },
+            { en: "writer", cn: "作家", phonetic: "/ˈraɪtə(r)/" },
+            { en: "worker", cn: "工人", phonetic: "/ˈwɜːkə(r)/" },
+            { en: "postman", cn: "邮递员", phonetic: "/ˈpəʊstmən/" },
+            { en: "taxi", cn: "出租车", phonetic: "/ˈtæksi/" },
+            { en: "station", cn: "站，所", phonetic: "/ˈsteɪʃn/" },
+            { en: "field", cn: "田地", phonetic: "/fiːld/" },
+            { en: "night", cn: "夜晚", phonetic: "/naɪt/" },
+        ],
+        phrases: [
+            { en: "help sick people", cn: "帮助病人" },
+            { en: "go to work", cn: "去上班" },
+            { en: "work in a hospital", cn: "在医院工作" },
+            { en: "work on a farm", cn: "在农场工作" },
+            { en: "drive a car", cn: "开车" },
+            { en: "grow vegetables", cn: "种蔬菜" },
+        ],
+        sentences: [
+            { en: "What's your father's job?", cn: "你爸爸的工作是什么？" },
+            { en: "What does your mother do?", cn: "你妈妈是做什么的？" },
+            { en: "He's a scientist!", cn: "他是一名科学家！" },
+            { en: "She's a nurse. She helps sick people.", cn: "她是一名护士，她帮助病人。" },
+            { en: "He works in a hospital.", cn: "他在医院工作。" },
+            { en: "I want to be a police officer.", cn: "我想成为警察。" },
+        ],
+        grammar: {
+            title: "三单 & 职业问答",
+            rules: ["What's...job? = What does...do?", "主语he/she/it + 动词加-s/-es"],
+            quizOptions: {
+                "He ___ in a hospital.": ["works", "work", "working"],
+                "She is ___ nurse.": ["a", "an", "the"],
+                "___ does your father do?": ["What", "Who", "Where"],
+                "My mother ___ English at school.": ["teaches", "teach", "teaching"],
+                "Is your uncle ___ driver?": ["a", "an", "the"],
+            }
+        },
+        phonics: { pattern: "or→/ɔː/, er→/ə(r)/", words: [{ en: "work", phonetic: "/wɜːk/" }, { en: "doctor", phonetic: "/ˈdɒktə(r)/" }, { en: "teacher", phonetic: "/ˈtiːtʃə(r)/" }, { en: "farmer", phonetic: "/ˈfɑːmə(r)/" }] }
+    },
+
+    2: {
+        id: 2, title: "How do you feel today?", titleCn: "情绪", bgColor: 0xffdab9,
+        vocabulary: [
+            { en: "happy", cn: "开心的", phonetic: "/ˈhæpi/" },
+            { en: "sad", cn: "伤心的", phonetic: "/sæd/" },
+            { en: "angry", cn: "生气的", phonetic: "/ˈæŋɡri/" },
+            { en: "scared", cn: "害怕的", phonetic: "/skeəd/" },
+            { en: "excited", cn: "兴奋的", phonetic: "/ɪkˈsaɪtɪd/" },
+            { en: "worried", cn: "担心的", phonetic: "/ˈwʌrid/" },
+            { en: "laugh", cn: "笑", phonetic: "/lɑːf/" },
+            { en: "cough", cn: "咳嗽", phonetic: "/kɒf/" },
+            { en: "better", cn: "好转的", phonetic: "/ˈbetə(r)/" },
+            { en: "gift", cn: "礼物", phonetic: "/ɡɪft/" },
+            { en: "model", cn: "模型", phonetic: "/ˈmɒdl/" },
+            { en: "shout", cn: "喊叫", phonetic: "/ʃaʊt/" },
+            { en: "should", cn: "应该", phonetic: "/ʃʊd/" },
+            { en: "feeling", cn: "感觉", phonetic: "/ˈfiːlɪŋ/" },
+            { en: "huge", cn: "巨大的", phonetic: "/hjuːdʒ/" },
+            { en: "street", cn: "街道", phonetic: "/striːt/" },
+        ],
+        phrases: [
+            { en: "feel happy", cn: "感到开心" },
+            { en: "feel sad", cn: "感到伤心" },
+            { en: "take part in", cn: "参加" },
+            { en: "get well soon", cn: "早日康复" },
+            { en: "a birthday gift", cn: "生日礼物" },
+            { en: "shout at sb.", cn: "对某人大喊" },
+        ],
+        sentences: [
+            { en: "How do you feel today?", cn: "你今天感觉怎么样？" },
+            { en: "I feel happy.", cn: "我感到开心。" },
+            { en: "Why are you sad?", cn: "你为什么伤心？" },
+            { en: "Is she coughing?", cn: "她在咳嗽吗？" },
+            { en: "I am feeling better now.", cn: "我现在感觉好多了。" },
+            { en: "We should say sorry.", cn: "我们应该道歉。" },
+        ],
+        grammar: {
+            title: "情感表达 & 现在进行时",
+            rules: ["主语+be/feel+形容词(表达感受)", "主语+be+动词-ing(进行时)", "should+动词原形(建议)"],
+            quizOptions: {
+                "I ___ happy today.": ["feel", "feels", "feeling"],
+                "She ___ coughing now.": ["is", "are", "am"],
+                "You ___ say sorry.": ["should", "shoulds", "shoulding"],
+                "Why ___ you sad?": ["are", "is", "am"],
+                "He is ___ at Ray.": ["shouting", "shout", "shouts"],
+            }
+        },
+        phonics: { pattern: "ee→/iː/, ea→/e/, y→/i/, ou→/aʊ/", words: [{ en: "feel", phonetic: "/fiːl/" }, { en: "head", phonetic: "/hed/" }, { en: "angry", phonetic: "/ˈæŋɡri/" }, { en: "shout", phonetic: "/ʃaʊt/" }] }
+    },
+
+    3: {
+        id: 3, title: "Everyone's got talent!", titleCn: "才能", bgColor: 0xdda0dd,
+        vocabulary: [
+            { en: "talent", cn: "才能", phonetic: "/ˈtælənt/" },
+            { en: "act", cn: "表演", phonetic: "/ækt/" },
+            { en: "magic", cn: "魔术", phonetic: "/ˈmædʒɪk/" },
+            { en: "shine", cn: "出众", phonetic: "/ʃaɪn/" },
+            { en: "puzzle", cn: "拼图", phonetic: "/ˈpʌzl/" },
+            { en: "dancer", cn: "舞者", phonetic: "/ˈdɑːnsə(r)/" },
+            { en: "win", cn: "获胜", phonetic: "/wɪn/" },
+            { en: "piano", cn: "钢琴", phonetic: "/piˈænəʊ/" },
+            { en: "photo", cn: "照片", phonetic: "/ˈfəʊtəʊ/" },
+            { en: "slowly", cn: "慢慢地", phonetic: "/ˈsləʊli/" },
+            { en: "boy", cn: "男孩", phonetic: "/bɔɪ/" },
+            { en: "fly", cn: "飞", phonetic: "/flaɪ/" },
+            { en: "swim", cn: "游泳", phonetic: "/swɪm/" },
+            { en: "sing", cn: "唱歌", phonetic: "/sɪŋ/" },
+            { en: "write", cn: "写", phonetic: "/raɪt/" },
+            { en: "hard", cn: "努力地", phonetic: "/hɑːd/" },
+        ],
+        phrases: [
+            { en: "be good at", cn: "擅长" },
+            { en: "play the piano", cn: "弹钢琴" },
+            { en: "take photos", cn: "拍照" },
+            { en: "do magic", cn: "变魔术" },
+            { en: "hard work", cn: "努力工作" },
+            { en: "dance well", cn: "跳舞好" },
+        ],
+        sentences: [
+            { en: "Everyone's got talent!", cn: "每个人都有才能！" },
+            { en: "What are you doing?", cn: "你在做什么？" },
+            { en: "I'm looking at their clothes.", cn: "我在看他们的衣服。" },
+            { en: "Don't worry about your clothes.", cn: "别担心你的衣服。" },
+            { en: "He is good at singing.", cn: "他擅长唱歌。" },
+            { en: "Talent is not enough. Hard work makes me shine.", cn: "才能不够，努力让我发光。" },
+        ],
+        grammar: {
+            title: "be good at & Don't祈使句",
+            rules: ["be good at + 名词/动词-ing(擅长)", "Don't + 动词原形(否定祈使句)", "What + be + 主语 + doing?(问正在做什么)"],
+            quizOptions: {
+                "She is good ___ dancing.": ["at", "in", "on"],
+                "___ worry about your clothes.": ["Don't", "Not", "No"],
+                "What ___ you doing?": ["are", "is", "am"],
+                "He is good at ___ the piano.": ["playing", "play", "plays"],
+                "Just go and ___!": ["dance", "dancing", "dances"],
+            }
+        },
+        phonics: { pattern: "ee→/iː/, ea→/e/或/iː/, br/cr→/br//kr/", words: [{ en: "see", phonetic: "/siː/" }, { en: "head", phonetic: "/hed/" }, { en: "teach", phonetic: "/tiːtʃ/" },] }
+    },
+
+    4: {
+        id: 4, title: "Plant life", titleCn: "植物", bgColor: 0x90ee90,
+        vocabulary: [
+            { en: "seed", cn: "种子", phonetic: "/siːd/" },
+            { en: "earth", cn: "泥土", phonetic: "/ɜːθ/" },
+            { en: "root", cn: "根", phonetic: "/ruːt/" },
+            { en: "stem", cn: "茎", phonetic: "/stem/" },
+            { en: "leaf", cn: "叶子", phonetic: "/liːf/" },
+            { en: "flower", cn: "花", phonetic: "/ˈflaʊə(r)/" },
+            { en: "dig", cn: "挖", phonetic: "/dɪɡ/" },
+            { en: "sunflower", cn: "向日葵", phonetic: "/ˈsʌnflaʊə(r)/" },
+            { en: "plant", cn: "种植", phonetic: "/plɑːnt/" },
+            { en: "dream", cn: "梦想", phonetic: "/driːm/" },
+            { en: "sleep", cn: "睡觉", phonetic: "/sliːp/" },
+            { en: "will", cn: "将要", phonetic: "/wɪl/" },
+            { en: "true", cn: "真的", phonetic: "/truː/" },
+            { en: "paper", cn: "纸", phonetic: "/ˈpeɪpə(r)/" },
+            { en: "grow", cn: "成长", phonetic: "/ɡrəʊ/" },
+        ],
+        phrases: [
+            { en: "plant seeds", cn: "播种" },
+            { en: "dig the earth", cn: "挖土" },
+            { en: "water the plants", cn: "浇水" },
+            { en: "grow up", cn: "长大" },
+            { en: "come true", cn: "实现" },
+            { en: "make paper", cn: "造纸" },
+        ],
+        sentences: [
+            { en: "What are you doing?", cn: "你们在做什么？" },
+            { en: "We're digging the earth.", cn: "我们在挖土。" },
+            { en: "Are your seeds growing?", cn: "你们的种子在发芽吗？" },
+            { en: "Yes, they are. Look!", cn: "是的，你看！" },
+            { en: "Grandpa's dreams will come true.", cn: "爷爷的梦想会实现的。" },
+            { en: "We use plants to make paper.", cn: "我们用植物造纸。" },
+        ],
+        grammar: {
+            title: "现在进行时 & will将来时",
+            rules: ["主语+will+动词原形(将来时)", "主语+be+动词-ing(进行时)", "use...to do...(用...做...)"],
+            quizOptions: {
+                "We ___ digging the earth.": ["are", "is", "am"],
+                "The seed ___ grow into a flower.": ["will", "wills", "willing"],
+                "We use cotton ___ make clothes.": ["to", "for", "in"],
+                "___ your seeds growing?": ["Are", "Is", "Do"],
+                "Why ___ the flower dying?": ["is", "are", "do"],
+            }
+        },
+        phonics: { pattern: "ee→/iː/, ea→/e/, ow→/aʊ/, oo→/uː/", words: [{ en: "seed", phonetic: "/siːd/" }, { en: "earth", phonetic: "/ɜːθ/" }, { en: "root", phonetic: "/ruːt/" },] }
+    },
+
+    5: {
+        id: 5, title: "School events", titleCn: "校园活动", bgColor: 0xfffacd,
+        vocabulary: [
+            { en: "drama", cn: "戏剧", phonetic: "/ˈdrɑːmə/" },
+            { en: "trip", cn: "旅行", phonetic: "/trɪp/" },
+            { en: "fair", cn: "集市", phonetic: "/feə(r)/" },
+            { en: "festival", cn: "节日", phonetic: "/ˈfestɪvl/" },
+            { en: "horn", cn: "角", phonetic: "/hɔːn/" },
+            { en: "dot", cn: "点", phonetic: "/dɒt/" },
+            { en: "raindrop", cn: "雨滴", phonetic: "/ˈreɪndrɒp/" },
+            { en: "more", cn: "更多的", phonetic: "/mɔː(r)/" },
+            { en: "special", cn: "特别的", phonetic: "/ˈspeʃl/" },
+            { en: "keeper", cn: "保管人", phonetic: "/ˈkiːpə(r)/" },
+            { en: "lovely", cn: "可爱的", phonetic: "/ˈlʌvli/" },
+            { en: "student", cn: "学生", phonetic: "/ˈstjuːdnt/" },
+            { en: "culture", cn: "文化", phonetic: "/ˈkʌltʃə(r)/" },
+            { en: "hour", cn: "小时", phonetic: "/ˈaʊə(r)/" },
+            { en: "note", cn: "笔记", phonetic: "/nəʊt/" },
+            { en: "forest", cn: "森林", phonetic: "/ˈfɒrɪst/" },
+        ],
+        phrases: [
+            { en: "Science Day", cn: "科学日" },
+            { en: "Book Week", cn: "读书周" },
+            { en: "Field Trip", cn: "实地考察" },
+            { en: "Art Festival", cn: "艺术节" },
+            { en: "Sports Day", cn: "运动会" },
+            { en: "take notes", cn: "做笔记" },
+            { en: "go back home", cn: "回家" },
+            { en: "nature hunt", cn: "自然探索" },
+        ],
+        sentences: [
+            { en: "What school events do you have?", cn: "你们有什么校园活动？" },
+            { en: "We have Science Day and Book Week.", cn: "我们有科学日和读书周。" },
+            { en: "Are there any interesting activities?", cn: "有什么有趣的活动吗？" },
+            { en: "There are so many things to see!", cn: "有好多东西可以看！" },
+            { en: "Look! There's a baby bird.", cn: "看！有一只小鸟。" },
+            { en: "We should help the baby bird.", cn: "我们应该帮助小鸟。" },
+        ],
+        grammar: {
+            title: "There be 句型",
+            rules: ["There is + 单数/不可数名词", "There are + 复数名词", "Is/Are there...? 疑问句"],
+            quizOptions: {
+                "There ___ a baby bird in the tree.": ["is", "are", "am"],
+                "There ___ many stands in the fair.": ["are", "is", "am"],
+                "___ there any games?": ["Are", "Is", "Do"],
+                "There isn't ___ book on the desk.": ["a", "any", "some"],
+                "We ___ help the baby bird.": ["should", "shoulds", "shoulding"],
+            }
+        },
+        phonics: { pattern: "or→/ɔː/, ou→/aʊ/, ow→/aʊ/", words: [{ en: "horn", phonetic: "/hɔːn/" }, { en: "hour", phonetic: "/ˈaʊə(r)/" },] }
+    },
+
+    6: {
+        id: 6, title: "Cool clothes", titleCn: "服装", bgColor: 0xffb6c1,
+        vocabulary: [
+            { en: "T-shirt", cn: "T恤", phonetic: "/ˈtiː ʃɜːt/" },
+            { en: "skirt", cn: "裙子", phonetic: "/skɜːt/" },
+            { en: "shorts", cn: "短裤", phonetic: "/ʃɔːts/" },
+            { en: "shirt", cn: "衬衫", phonetic: "/ʃɜːt/" },
+            { en: "trousers", cn: "裤子", phonetic: "/ˈtraʊzəz/" },
+            { en: "scarf", cn: "围巾", phonetic: "/skɑːf/" },
+            { en: "sweater", cn: "毛衣", phonetic: "/ˈswetə(r)/" },
+            { en: "dress", cn: "连衣裙", phonetic: "/dres/" },
+            { en: "coat", cn: "外套", phonetic: "/kəʊt/" },
+            { en: "hat", cn: "帽子", phonetic: "/hæt/" },
+            { en: "party", cn: "聚会", phonetic: "/ˈpɑːti/" },
+            { en: "wrong", cn: "错误的", phonetic: "/rɒŋ/" },
+            { en: "clever", cn: "聪明的", phonetic: "/ˈklevə(r)/" },
+            { en: "uniform", cn: "制服", phonetic: "/ˈjuːnɪfɔːm/" },
+            { en: "cool", cn: "凉爽的", phonetic: "/kuːl/" },
+        ],
+        phrases: [
+            { en: "wear a T-shirt", cn: "穿T恤" },
+            { en: "look for", cn: "寻找" },
+            { en: "cut up", cn: "剪开" },
+            { en: "make clothes", cn: "做衣服" },
+            { en: "school uniform", cn: "校服" },
+            { en: "get...wrong", cn: "把...弄错" },
+        ],
+        sentences: [
+            { en: "What are you wearing today?", cn: "你今天穿了什么？" },
+            { en: "I'm wearing a T-shirt and shorts.", cn: "我穿了T恤和短裤。" },
+            { en: "What do you want to wear to the party?", cn: "你想穿什么去派对？" },
+            { en: "I want to wear my favourite blue dress.", cn: "我想穿我最喜欢的蓝裙子。" },
+            { en: "Is Mum cutting up my dress?", cn: "妈妈在剪我的裙子吗？" },
+            { en: "It's cold outside. Wear a coat.", cn: "外面冷，穿上外套。" },
+        ],
+        grammar: {
+            title: "穿着表达 & should建议",
+            rules: ["What + be + 主语 + wearing?(问穿着)", "主语+be+wearing+衣物(答穿着)", "should+动词原形(建议)"],
+            quizOptions: {
+                "What ___ you wearing?": ["are", "is", "am"],
+                "She ___ wearing a pink dress.": ["is", "are", "am"],
+                "You ___ wear a coat. It's cold.": ["should", "shoulds", "shoulding"],
+                "I want to ___ my blue dress.": ["wear", "wearing", "wears"],
+                "___ Mum cutting up my dress?": ["Is", "Are", "Do"],
+            }
+        },
+        phonics: { pattern: "ea→/iː/, ee→/iː/, oa→/əʊ/, or→/ɔː/", words: [{ en: "teach", phonetic: "/tiːtʃ/" }, { en: "coat", phonetic: "/kəʊt/" }, { en: "shorts", phonetic: "/ʃɔːts/" },] }
+    }
+};
+// Level configurations - Phase 3 will have full 24 levels
+const LEVELS = {};
+
+// Placeholder: Will be populated in Phase 3
+console.log('Levels data loaded (placeholder)');
+class Boss extends Phaser.GameObjects.Container {
+    constructor(scene, x, y) {
+        super(scene, x, y);
+        scene.add.existing(this);
+
+        // Use a hidden physics sprite as the body (avoids isParent error with Container physics)
+        this._bodySprite = scene.add.zone(x, y, 60, 60);
+        scene.physics.add.existing(this._bodySprite, false);
+        this._bodySprite.body.setImmovable(true);
+        this._bodySprite.body.setAllowGravity(false);
+
+        this.hp = 3;
+        this.maxHp = 3;
+        this.defeated = false;
+
+        // Boss body (large, menacing)
+        const body = scene.add.graphics();
+        body.fillStyle(0x4a148c);
+        body.fillCircle(0, 0, 30);
+        body.fillStyle(0x7b2d8e);
+        body.fillCircle(-8, -12, 10);
+        body.fillCircle(8, -12, 10);
+        // Red eyes
+        body.fillStyle(0xff0000);
+        body.fillCircle(-10, -8, 6);
+        body.fillCircle(10, -8, 6);
+        body.fillStyle(0xffff00);
+        body.fillCircle(-10, -8, 3);
+        body.fillCircle(10, -8, 3);
+        // Mouth
+        body.fillStyle(0xffffff);
+        body.fillRect(-12, 8, 24, 8);
+        body.fillStyle(0x333333);
+        for (let i = 0; i < 4; i++) {
+            body.fillRect(-10 + i * 6, 10, 3, 3);
+        }
+        // Crown
+        body.fillStyle(0xffd700);
+        body.fillTriangle(-15, -28, 0, -44, 15, -28);
+        body.fillTriangle(-18, -28, -5, -38, 8, -28);
+        body.fillTriangle(-8, -28, 5, -38, 18, -28);
+        this.add(body);
+
+        // HP bar background
+        const hpBg = scene.add.graphics();
+        hpBg.fillStyle(0x333333);
+        hpBg.fillRect(-35, -55, 70, 8);
+        this.add(hpBg);
+
+        // HP bar foreground
+        this.hpBar = scene.add.graphics();
+        this.updateHpBar();
+        this.add(this.hpBar);
+
+        // Boss label
+        const label = scene.add.text(0, -65, 'BOSS', {
+            fontSize: '12px',
+            fontFamily: 'Arial',
+            fontStyle: 'bold',
+            color: '#ff6b6b',
+            stroke: '#000',
+            strokeThickness: 2
+        }).setOrigin(0.5);
+        this.add(label);
+
+        // Bobbing animation (moves the container AND the body sprite together)
+        this.initY = y;
+        scene.tweens.add({
+            targets: this,
+            y: y - 10,
+            duration: 800,
+            yoyo: true,
+            repeat: -1,
+            ease: 'Sine.easeInOut',
+            onUpdate: () => {
+                this._bodySprite.y = this.y;
+                this._bodySprite.x = this.x;
+            }
+        });
+    }
+
+    updateHpBar() {
+        this.hpBar.clear();
+        const ratio = this.hp / this.maxHp;
+        const color = ratio > 0.6 ? 0x4caf50 : ratio > 0.3 ? 0xff9800 : 0xff0000;
+        this.hpBar.fillStyle(color);
+        this.hpBar.fillRect(-35, -55, 70 * ratio, 8);
+    }
+
+    takeDamage() {
+        if (this.defeated) return false;
+        this.hp--;
+        this.updateHpBar();
+
+        this.scene.tweens.add({
+            targets: this,
+            alpha: 0.3,
+            duration: 100,
+            yoyo: true,
+            repeat: 2
+        });
+
+        if (this.hp <= 0) {
+            this.defeat();
+            return true;
+        }
+        return false;
+    }
+
+    defeat() {
+        this.defeated = true;
+        this._bodySprite.body.enable = false;
+        this.scene.cameras.main.shake(400, 0.02);
+        for (let i = 0; i < 15; i++) {
+            const sparkle = this.scene.add.image(
+                this.x + Phaser.Math.Between(-30, 30),
+                this.y + Phaser.Math.Between(-30, 30),
+                'sparkle'
+            ).setScale(1.5);
+            this.scene.tweens.add({
+                targets: sparkle,
+                x: sparkle.x + Phaser.Math.Between(-80, 80),
+                y: sparkle.y - Phaser.Math.Between(30, 80),
+                alpha: 0,
+                scale: 0,
+                duration: 600,
+                onComplete: () => sparkle.destroy()
+            });
+        }
+
+        const vText = this.scene.add.text(this.x, this.y - 50, '击败Boss!', {
+            fontSize: '18px',
+            fontFamily: 'Arial',
+            fontStyle: 'bold',
+            color: '#ffd700',
+            stroke: '#333',
+            strokeThickness: 3
+        }).setOrigin(0.5);
+        this.scene.tweens.add({
+            targets: vText,
+            y: this.y - 70,
+            alpha: 0,
+            duration: 1200,
+            onComplete: () => vText.destroy()
+        });
+
+        this.scene.time.delayedCall(800, () => {
+            this.destroy();
+        });
+    }
+}
+class Player extends Phaser.Physics.Arcade.Sprite {
+    constructor(scene, x, y) {
+        super(scene, x, y, 'player_idle');
+        scene.add.existing(this);
+        scene.physics.add.existing(this);
+
+        this.setCollideWorldBounds(true);
+        this.body.setSize(18, 30);
+        this.body.setOffset(7, 4);
+
+        // Movement
+        this.speed = 200;
+        this.jumpForce = -480;
+        this.isJumping = false;
+        this.coins = 0;
+        this.lives = 3;
+
+        // Input
+        this.cursors = scene.input.keyboard.createCursorKeys();
+        this.spaceKey = scene.input.keyboard.addKey('SPACE');
+        this.wasd = {
+            up: scene.input.keyboard.addKey('W'),
+            left: scene.input.keyboard.addKey('A'),
+            right: scene.input.keyboard.addKey('D')
+        };
+
+        // Touch input for mobile
+        this.touchLeft = false;
+        this.touchRight = false;
+        this.touchJump = false;
+        this.setupTouchInput(scene);
+
+        // Animation state
+        this.facingRight = true;
+        this.walkTimer = 0;
+        this.currentWalkFrame = 'player_walk1';
+    }
+
+    setupTouchInput(scene) {
+        scene.input.on('pointerdown', (pointer) => {
+            const halfW = scene.cameras.main.width / 2;
+            if (pointer.x < halfW / 2) {
+                this.touchLeft = true;
+            } else if (pointer.x > halfW * 1.5) {
+                this.touchRight = true;
+            } else {
+                this.touchJump = true;
+            }
+        });
+        scene.input.on('pointerup', () => {
+            this.touchLeft = false;
+            this.touchRight = false;
+            this.touchJump = false;
+        });
+    }
+
+    update() {
+        const onGround = this.body.blocked.down || this.body.touching.down;
+
+        // Horizontal movement (keyboard + touch)
+        const left = this.cursors.left.isDown || this.wasd.left.isDown || this.touchLeft;
+        const right = this.cursors.right.isDown || this.wasd.right.isDown || this.touchRight;
+        const jump = this.cursors.up.isDown || this.wasd.up.isDown || this.spaceKey.isDown || this.touchJump;
+
+        if (left) {
+            this.setVelocityX(-this.speed);
+            this.setFlipX(true);
+            this.facingRight = false;
+        } else if (right) {
+            this.setVelocityX(this.speed);
+            this.setFlipX(false);
+            this.facingRight = true;
+        } else {
+            this.setVelocityX(0);
+        }
+
+        // Jump (only when on ground)
+        if (jump && onGround && !this._jumpLock) {
+            this.setVelocityY(this.jumpForce);
+            this._jumpLock = true;
+            if (typeof audioManager !== 'undefined' && audioManager) {
+                audioManager.sfxJump();
+            }
+        }
+
+        // Release jump lock when key released and on ground
+        if (!jump && onGround) {
+            this._jumpLock = false;
+        }
+
+        if (onGround) {
+            this.isJumping = false;
+        }
+
+        // Animation
+        if (!onGround) {
+            this.setTexture('player_jump');
+        } else if (left || right) {
+            this.walkTimer += this.scene.game.loop.delta;
+            if (this.walkTimer > 150) {
+                this.walkTimer = 0;
+                this.currentWalkFrame = this.currentWalkFrame === 'player_walk1' ? 'player_walk2' : 'player_walk1';
+            }
+            this.setTexture(this.currentWalkFrame);
+        } else {
+            this.setTexture('player_idle');
+        }
+
+        // Fall death check
+        if (this.y > this.scene.cameras.main.height + 50) {
+            this.die();
+        }
+    }
+
+    addCoin() {
+        this.coins++;
+        this.setTint(0xffff00);
+        this.scene.time.delayedCall(100, () => {
+            this.clearTint();
+        });
+    }
+
+    takeDamage() {
+        this.lives--;
+        this.setTint(0xff0000);
+        this.scene.time.delayedCall(300, () => {
+            this.clearTint();
+        });
+
+        // Brief invulnerability
+        this.body.checkCollision.none = true;
+        this.scene.time.delayedCall(1000, () => {
+            if (this.active && this.body) {
+                this.body.checkCollision.none = false;
+            }
+        });
+
+        if (this.lives <= 0) {
+            this.die();
+        }
+    }
+
+    die() {
+        this.scene.cameras.main.shake(300, 0.01);
+        this.setTint(0xff0000);
+        this.scene.time.delayedCall(500, () => {
+            // Reset player instead of restarting scene (avoids keyboard state loss)
+            if (this.scene.resetPlayer) {
+                this.scene.resetPlayer();
+            } else {
+                this.scene.scene.restart();
+            }
+        });
+    }
+}
+// Question block entity
+class QuestionBlock extends Phaser.Physics.Arcade.Sprite {
+    constructor(scene, x, y) {
+        super(scene, x, y, 'question_block');
+        scene.add.existing(this);
+        scene.physics.add.existing(this, true); // static
+        this.isActive = true;
+    }
+
+    hit() {
+        if (!this.isActive) return null;
+        this.isActive = false;
+        this.setTexture('question_block_hit');
+        return true;
+    }
+}
+// Coin entity
+class Coin extends Phaser.Physics.Arcade.Sprite {
+    constructor(scene, x, y) {
+        super(scene, x, y, 'coin');
+        scene.add.existing(this);
+        scene.physics.add.existing(this);
+        this.body.setAllowGravity(false);
+    }
+}
+// Enemy entity - supports ground patrol, flying, and projectile types
+class Enemy extends Phaser.Physics.Arcade.Sprite {
+    constructor(scene, x, y, type) {
+        super(scene, x, y, 'enemy');
+        scene.add.existing(this);
+        scene.physics.add.existing(this);
+
+        this.enemyType = type || 'ground';
+        this.patrolRange = 80;
+        this.startX = x;
+        this.startY = y;
+        this._shootTimer = 0;
+
+        // Visual variety per type
+        this.body.setBounce(0);
+
+        switch (this.enemyType) {
+            case 'flying':
+                this.setTint(0xff6b6b); // Red-ish
+                this.body.setAllowGravity(false);
+                this.body.setVelocityY(50);
+                this.patrolRange = 60;
+                break;
+            case 'shooter':
+                this.setTint(0xff9800); // Orange
+                this.body.setVelocityX(30);
+                this.patrolRange = 60;
+                this._shootTimer = Phaser.Math.Between(2000, 4000);
+                break;
+            case 'speedy':
+                this.setTint(0x00bcd4); // Cyan
+                this.setScale(0.7);
+                this.body.setVelocityX(80);
+                this.patrolRange = 120;
+                break;
+            default: // ground
+                this.setTint(0x9932cc); // Purple (original)
+                this.body.setVelocityX(40);
+                break;
+        }
+    }
+
+    update(time, delta) {
+        if (!this.active) return;
+
+        switch (this.enemyType) {
+            case 'flying':
+                // Float up and down
+                if (this.y < this.startY - this.patrolRange) {
+                    this.body.setVelocityY(50);
+                } else if (this.y > this.startY + this.patrolRange) {
+                    this.body.setVelocityY(-50);
+                }
+                break;
+            case 'shooter':
+                // Patrol and shoot
+                if (this.x > this.startX + this.patrolRange) {
+                    this.body.setVelocityX(-30);
+                } else if (this.x < this.startX - this.patrolRange) {
+                    this.body.setVelocityX(30);
+                }
+                // Shoot projectile
+                this._shootTimer -= delta;
+                if (this._shootTimer <= 0) {
+                    this.shoot();
+                    this._shootTimer = Phaser.Math.Between(3000, 5000);
+                }
+                break;
+            case 'speedy':
+                // Fast patrol
+                if (this.x > this.startX + this.patrolRange) {
+                    this.body.setVelocityX(-80);
+                    this.setFlipX(true);
+                } else if (this.x < this.startX - this.patrolRange) {
+                    this.body.setVelocityX(80);
+                    this.setFlipX(false);
+                }
+                break;
+            default: // ground
+                if (this.x > this.startX + this.patrolRange) {
+                    this.body.setVelocityX(-40);
+                } else if (this.x < this.startX - this.patrolRange) {
+                    this.body.setVelocityX(40);
+                }
+                break;
+        }
+    }
+
+    shoot() {
+        if (!this.scene || !this.active) return;
+        // Create a small projectile toward the player
+        const proj = this.scene.add.circle(this.x, this.y, 6, 0xff0000);
+        proj.setDepth(5);
+        this.scene.physics.add.existing(proj);
+        proj.body.setAllowGravity(false);
+
+        // Direction toward player (or left if player not found)
+        const player = this.scene.player;
+        const dirX = player ? (player.x < this.x ? -1 : 1) : -1;
+        proj.body.setVelocity(dirX * 150, -60);
+
+        // Add to scene's enemy projectiles list for collision
+        if (!this.scene._enemyProjectiles) {
+            this.scene._enemyProjectiles = this.scene.physics.add.group();
+        }
+        this.scene._enemyProjectiles.add(proj);
+
+        // Auto-destroy after 3 seconds
+        this.scene.time.delayedCall(3000, () => {
+            if (proj.active) proj.destroy();
+        });
+    }
+}
+class BootScene extends Phaser.Scene {
+    constructor() {
+        super({ key: 'BootScene' });
+    }
+
+    create() {
+        const { width, height } = this.cameras.main;
+
+        // Simple loading text
+        const loadText = this.add.text(width / 2, height / 2, '正在准备游戏...', {
+            fontSize: '20px',
+            fontFamily: 'Arial',
+            color: '#ffb6c1'
+        }).setOrigin(0.5);
+
+        // Generate textures in next frame so text renders first
+        this.time.delayedCall(100, () => {
+            this.generateTextures();
+            loadText.setText('准备好了!');
+            this.time.delayedCall(300, () => {
+                this.scene.start('MenuScene');
+            });
+        });
+    }
+
+    generateTextures() {
+        // --- Player (cute girl character) ---
+        this.createPlayerTextures();
+
+        // --- Ground tile ---
+        const gg = this.make.graphics({ add: false });
+        gg.fillStyle(0x7ec850);
+        gg.fillRect(0, 0, 32, 6);
+        gg.fillStyle(0xc8845c);
+        gg.fillRect(0, 6, 32, 26);
+        gg.fillStyle(0xb8733a);
+        gg.fillRect(4, 12, 3, 3);
+        gg.fillRect(14, 16, 3, 3);
+        gg.fillRect(24, 10, 3, 3);
+        gg.fillRect(8, 22, 3, 3);
+        gg.fillRect(20, 20, 3, 3);
+        gg.generateTexture('ground', 32, 32);
+        gg.destroy();
+
+        // --- Platform tile ---
+        const platg = this.make.graphics({ add: false });
+        platg.fillStyle(0xdeb887);
+        platg.fillRect(0, 0, 32, 16);
+        platg.fillStyle(0xc4a46c);
+        platg.fillRect(0, 0, 32, 2);
+        platg.fillStyle(0xa0825a);
+        platg.fillRect(0, 14, 32, 2);
+        platg.generateTexture('platform', 32, 16);
+        platg.destroy();
+
+        // --- Question block ---
+        const qg = this.make.graphics({ add: false });
+        qg.fillStyle(0xffa500);
+        qg.fillRect(0, 0, 32, 32);
+        qg.lineStyle(1, 0x8b6914);
+        qg.strokeRect(0, 0, 32, 32);
+        qg.fillStyle(0xffd700);
+        qg.fillRect(3, 3, 26, 26);
+        qg.lineStyle(1, 0x8b6914);
+        qg.strokeRect(3, 3, 26, 26);
+        qg.fillStyle(0x8b4513);
+        // "?" mark
+        qg.fillRect(12, 6, 8, 3);
+        qg.fillRect(14, 10, 4, 3);
+        qg.fillRect(12, 17, 4, 3);
+        qg.fillRect(14, 14, 4, 3);
+        qg.fillRect(16, 20, 4, 3);
+        qg.generateTexture('question_block', 32, 32);
+        qg.destroy();
+
+        // Question block - hit (dark, empty)
+        const qh = this.make.graphics({ add: false });
+        qh.fillStyle(0x8b7355);
+        qh.fillRect(0, 0, 32, 32);
+        qh.lineStyle(1, 0x5c4a2e);
+        qh.strokeRect(0, 0, 32, 32);
+        qh.fillStyle(0x7a6240);
+        qh.fillRect(3, 3, 26, 26);
+        qh.generateTexture('question_block_hit', 32, 32);
+        qh.destroy();
+
+        // --- Coin ---
+        const cg = this.make.graphics({ add: false });
+        cg.fillStyle(0xffd700);
+        cg.fillCircle(8, 8, 7);
+        cg.fillStyle(0xffec8b);
+        cg.fillCircle(7, 7, 3);
+        cg.generateTexture('coin', 16, 16);
+        cg.destroy();
+
+        // --- Enemy ---
+        const eg = this.make.graphics({ add: false });
+        eg.fillStyle(0x9932cc);
+        eg.fillCircle(16, 18, 14);
+        eg.fillStyle(0xffffff);
+        eg.fillCircle(11, 14, 4);
+        eg.fillCircle(21, 14, 4);
+        eg.fillStyle(0x333333);
+        eg.fillCircle(12, 14, 2);
+        eg.fillCircle(22, 14, 2);
+        eg.lineStyle(2, 0x333333);
+        eg.lineBetween(7, 9, 14, 11);
+        eg.lineBetween(25, 9, 18, 11);
+        eg.fillStyle(0x333333);
+        eg.fillRect(6, 26, 8, 4);
+        eg.fillRect(18, 26, 8, 4);
+        eg.generateTexture('enemy', 32, 32);
+        eg.destroy();
+
+        // --- Flag pole ---
+        const fg = this.make.graphics({ add: false });
+        fg.fillStyle(0x888888);
+        fg.fillRect(8, 0, 4, 64);
+        fg.fillStyle(0xff6b6b);
+        fg.fillTriangle(12, 4, 34, 14, 12, 24);
+        fg.fillStyle(0xffd700);
+        fg.fillCircle(10, 0, 6);
+        fg.generateTexture('flag', 36, 64);
+        fg.destroy();
+
+        // --- Star ---
+        const sg = this.make.graphics({ add: false });
+        sg.fillStyle(0xffd700);
+        sg.beginPath();
+        const cx = 12, cy = 12, r = 10, ri = 4;
+        for (let i = 0; i < 5; i++) {
+            const angle = (i * 72 - 90) * Math.PI / 180;
+            const innerAngle = ((i * 72) + 36 - 90) * Math.PI / 180;
+            if (i === 0) sg.moveTo(cx + r * Math.cos(angle), cy + r * Math.sin(angle));
+            else sg.lineTo(cx + r * Math.cos(angle), cy + r * Math.sin(angle));
+            sg.lineTo(cx + ri * Math.cos(innerAngle), cy + ri * Math.sin(innerAngle));
+        }
+        sg.closePath();
+        sg.fillPath();
+        sg.generateTexture('star', 24, 24);
+        sg.destroy();
+
+        // --- Heart ---
+        const hg = this.make.graphics({ add: false });
+        hg.fillStyle(0xff6b6b);
+        hg.fillCircle(8, 6, 5);
+        hg.fillCircle(16, 6, 5);
+        hg.fillTriangle(3, 9, 21, 9, 12, 20);
+        hg.generateTexture('heart', 24, 24);
+        hg.destroy();
+
+        // --- Sparkle particle ---
+        const spg = this.make.graphics({ add: false });
+        spg.fillStyle(0xffffff);
+        spg.fillRect(2, 0, 3, 3);
+        spg.fillRect(0, 2, 7, 3);
+        spg.fillRect(2, 5, 3, 3);
+        spg.generateTexture('sparkle', 7, 8);
+        spg.destroy();
+    }
+
+    createPlayerTextures() {
+        // Frame: Idle
+        let pg = this.make.graphics({ add: false });
+        pg.fillStyle(0x5c3317);
+        pg.fillRect(10, 0, 12, 8);
+        pg.fillRect(10, 8, 2, 12);
+        pg.fillRect(20, 8, 2, 12);
+        pg.fillRect(22, 4, 6, 6);
+        pg.fillStyle(0xffdab9);
+        pg.fillRect(12, 8, 8, 8);
+        pg.fillStyle(0x333333);
+        pg.fillRect(14, 10, 2, 2);
+        pg.fillRect(18, 10, 2, 2);
+        pg.fillStyle(0xff9999);
+        pg.fillRect(15, 14, 4, 1);
+        pg.fillStyle(0xff69b4);
+        pg.fillRect(10, 16, 12, 10);
+        pg.fillRect(8, 18, 16, 6);
+        pg.fillStyle(0xffdab9);
+        pg.fillRect(6, 18, 4, 6);
+        pg.fillRect(22, 18, 4, 6);
+        pg.fillRect(12, 26, 3, 6);
+        pg.fillRect(17, 26, 3, 6);
+        pg.fillStyle(0xff69b4);
+        pg.fillRect(11, 32, 4, 3);
+        pg.fillRect(17, 32, 4, 3);
+        pg.generateTexture('player_idle', 32, 36);
+        pg.destroy();
+
+        // Frame: Walk 1
+        pg = this.make.graphics({ add: false });
+        pg.fillStyle(0x5c3317);
+        pg.fillRect(10, 0, 12, 8);
+        pg.fillRect(10, 8, 2, 12);
+        pg.fillRect(20, 8, 2, 12);
+        pg.fillRect(22, 4, 6, 6);
+        pg.fillStyle(0xffdab9);
+        pg.fillRect(12, 8, 8, 8);
+        pg.fillStyle(0x333333);
+        pg.fillRect(14, 10, 2, 2);
+        pg.fillRect(18, 10, 2, 2);
+        pg.fillStyle(0xff9999);
+        pg.fillRect(15, 14, 4, 1);
+        pg.fillStyle(0xff69b4);
+        pg.fillRect(10, 16, 12, 10);
+        pg.fillRect(8, 18, 16, 6);
+        pg.fillStyle(0xffdab9);
+        pg.fillRect(6, 18, 4, 6);
+        pg.fillRect(22, 18, 4, 6);
+        pg.fillRect(11, 26, 3, 6);
+        pg.fillRect(18, 26, 3, 6);
+        pg.fillStyle(0xff69b4);
+        pg.fillRect(10, 32, 4, 3);
+        pg.fillRect(18, 32, 4, 3);
+        pg.generateTexture('player_walk1', 32, 36);
+        pg.destroy();
+
+        // Frame: Walk 2
+        pg = this.make.graphics({ add: false });
+        pg.fillStyle(0x5c3317);
+        pg.fillRect(10, 0, 12, 8);
+        pg.fillRect(10, 8, 2, 12);
+        pg.fillRect(20, 8, 2, 12);
+        pg.fillRect(22, 4, 6, 6);
+        pg.fillStyle(0xffdab9);
+        pg.fillRect(12, 8, 8, 8);
+        pg.fillStyle(0x333333);
+        pg.fillRect(14, 10, 2, 2);
+        pg.fillRect(18, 10, 2, 2);
+        pg.fillStyle(0xff9999);
+        pg.fillRect(15, 14, 4, 1);
+        pg.fillStyle(0xff69b4);
+        pg.fillRect(10, 16, 12, 10);
+        pg.fillRect(8, 18, 16, 6);
+        pg.fillStyle(0xffdab9);
+        pg.fillRect(6, 18, 4, 6);
+        pg.fillRect(22, 18, 4, 6);
+        pg.fillRect(13, 26, 3, 6);
+        pg.fillRect(17, 26, 3, 6);
+        pg.fillStyle(0xff69b4);
+        pg.fillRect(12, 32, 4, 3);
+        pg.fillRect(16, 32, 4, 3);
+        pg.generateTexture('player_walk2', 32, 36);
+        pg.destroy();
+
+        // Frame: Jump
+        pg = this.make.graphics({ add: false });
+        pg.fillStyle(0x5c3317);
+        pg.fillRect(10, 0, 12, 8);
+        pg.fillRect(10, 8, 2, 12);
+        pg.fillRect(20, 8, 2, 12);
+        pg.fillRect(22, 0, 6, 8);
+        pg.fillStyle(0xffdab9);
+        pg.fillRect(12, 8, 8, 8);
+        pg.fillStyle(0x333333);
+        pg.fillRect(14, 10, 2, 2);
+        pg.fillRect(18, 10, 2, 2);
+        pg.fillStyle(0xff9999);
+        pg.fillRect(14, 13, 4, 2);
+        pg.fillStyle(0xff69b4);
+        pg.fillRect(10, 16, 12, 10);
+        pg.fillRect(8, 18, 16, 6);
+        pg.fillStyle(0xffdab9);
+        pg.fillRect(6, 16, 4, 6);
+        pg.fillRect(22, 16, 4, 6);
+        pg.fillRect(10, 26, 3, 4);
+        pg.fillRect(17, 26, 3, 4);
+        pg.fillStyle(0xff69b4);
+        pg.fillRect(9, 30, 4, 3);
+        pg.fillRect(17, 30, 4, 3);
+        pg.generateTexture('player_jump', 32, 36);
+        pg.destroy();
+    }
+}
+class MenuScene extends Phaser.Scene {
+    constructor() {
+        super({ key: 'MenuScene' });
+    }
+
+    create() {
+        const { width, height } = this.cameras.main;
+
+        // Sky gradient background
+        const bg = this.add.graphics();
+        bg.fillGradientStyle(0x87ceeb, 0x87ceeb, 0xffb6c1, 0xffb6c1, 1);
+        bg.fillRect(0, 0, width, height);
+
+        // Ground
+        const ground = this.add.graphics();
+        ground.fillStyle(0x7ec850);
+        ground.fillRect(0, height - 60, width, 60);
+        ground.fillStyle(0xc8845c);
+        ground.fillRect(0, height - 54, width, 54);
+
+        // Decorative clouds
+        this.addCloud(120, 60);
+        this.addCloud(400, 40);
+        this.addCloud(650, 80);
+
+        // Decorative flowers on ground
+        for (let i = 0; i < 10; i++) {
+            const fx = 40 + i * 80;
+            this.addFlower(fx, height - 68);
+        }
+
+        // Title
+        const titleShadow = this.add.text(width / 2 + 2, 82, '英语大冒险', {
+            fontSize: '48px',
+            fontFamily: 'Arial, sans-serif',
+            fontStyle: 'bold',
+            color: '#333333'
+        }).setOrigin(0.5);
+
+        const title = this.add.text(width / 2, 80, '英语大冒险', {
+            fontSize: '48px',
+            fontFamily: 'Arial, sans-serif',
+            fontStyle: 'bold',
+            color: '#ffffff',
+            stroke: '#ff69b4',
+            strokeThickness: 4
+        }).setOrigin(0.5);
+
+        // Subtitle
+        this.add.text(width / 2, 130, 'English Adventure', {
+            fontSize: '18px',
+            fontFamily: 'Arial, sans-serif',
+            color: '#ffffff',
+            stroke: '#dda0dd',
+            strokeThickness: 2
+        }).setOrigin(0.5);
+
+        // Decorative stars around title
+        for (let i = 0; i < 5; i++) {
+            const sx = width / 2 - 160 + i * 80;
+            const sy = 100 + Math.sin(i * 1.2) * 15;
+            const star = this.add.image(sx, sy, 'star').setScale(1 + Math.random() * 0.5);
+            this.tweens.add({
+                targets: star,
+                y: sy - 5,
+                duration: 800 + i * 200,
+                yoyo: true,
+                repeat: -1,
+                ease: 'Sine.easeInOut'
+            });
+        }
+
+        // Start button
+        const btnY = 210;
+        const btn = this.add.graphics();
+        btn.fillStyle(0xff69b4);
+        btn.fillRoundedRect(width / 2 - 80, btnY - 25, 160, 50, 12);
+        btn.lineStyle(3, 0xffffff);
+        btn.strokeRoundedRect(width / 2 - 80, btnY - 25, 160, 50, 12);
+
+        const btnText = this.add.text(width / 2, btnY, '开始冒险', {
+            fontSize: '24px',
+            fontFamily: 'Arial, sans-serif',
+            fontStyle: 'bold',
+            color: '#ffffff'
+        }).setOrigin(0.5);
+
+        // Make button interactive
+        const btnZone = this.add.zone(width / 2, btnY, 160, 50).setInteractive({ useHandCursor: true });
+
+        btnZone.on('pointerover', () => {
+            btn.clear();
+            btn.fillStyle(0xff85c1);
+            btn.fillRoundedRect(width / 2 - 80, btnY - 25, 160, 50, 12);
+            btn.lineStyle(3, 0xffffff);
+            btn.strokeRoundedRect(width / 2 - 80, btnY - 25, 160, 50, 12);
+        });
+
+        btnZone.on('pointerout', () => {
+            btn.clear();
+            btn.fillStyle(0xff69b4);
+            btn.fillRoundedRect(width / 2 - 80, btnY - 25, 160, 50, 12);
+            btn.lineStyle(3, 0xffffff);
+            btn.strokeRoundedRect(width / 2 - 80, btnY - 25, 160, 50, 12);
+        });
+
+        btnZone.on('pointerdown', () => {
+            this.cameras.main.fadeOut(500, 255, 255, 255);
+            this.time.delayedCall(500, () => {
+                this.scene.start('WorldSelectScene');
+            });
+        });
+
+        // Settings hint
+        this.add.text(width / 2, 280, '双击网页即可开始 | 适合小学四年级', {
+            fontSize: '12px',
+            fontFamily: 'Arial, sans-serif',
+            color: '#ffffff',
+            alpha: 0.7
+        }).setOrigin(0.5);
+
+        // Cute character on title screen
+        const char = this.add.image(width / 2, height - 100, 'player_idle').setScale(3);
+        this.tweens.add({
+            targets: char,
+            y: height - 105,
+            duration: 600,
+            yoyo: true,
+            repeat: -1,
+            ease: 'Sine.easeInOut'
+        });
+
+        // Fade in
+        this.cameras.main.fadeIn(500, 255, 255, 255);
+
+        // Floating sparkles
+        for (let i = 0; i < 8; i++) {
+            const sx = Phaser.Math.Between(50, width - 50);
+            const sy = Phaser.Math.Between(50, height - 100);
+            const sparkle = this.add.image(sx, sy, 'sparkle').setAlpha(0);
+            this.tweens.add({
+                targets: sparkle,
+                alpha: 0.8,
+                y: sy - 20,
+                duration: 1500 + i * 300,
+                yoyo: true,
+                repeat: -1,
+                delay: i * 400,
+                ease: 'Sine.easeInOut'
+            });
+        }
+    }
+
+    addCloud(x, y) {
+        const cloud = this.add.graphics();
+        cloud.fillStyle(0xffffff, 0.8);
+        cloud.fillCircle(x, y, 20);
+        cloud.fillCircle(x + 20, y - 5, 25);
+        cloud.fillCircle(x + 40, y, 20);
+        cloud.fillCircle(x + 15, y + 5, 18);
+
+        this.tweens.add({
+            targets: cloud,
+            x: 30,
+            duration: 8000 + Math.random() * 4000,
+            yoyo: true,
+            repeat: -1,
+            ease: 'Sine.easeInOut'
+        });
+    }
+
+    addFlower(x, y) {
+        const flower = this.add.graphics();
+        // Stem
+        flower.fillStyle(0x228b22);
+        flower.fillRect(x + 2, y, 3, 12);
+        // Petals
+        flower.fillStyle(0xffb6c1);
+        flower.fillCircle(x, y - 2, 4);
+        flower.fillCircle(x + 6, y - 2, 4);
+        flower.fillCircle(x + 3, y - 6, 4);
+        // Center
+        flower.fillStyle(0xffd700);
+        flower.fillCircle(x + 3, y - 2, 3);
+    }
+}
+class WorldSelectScene extends Phaser.Scene {
+    constructor() {
+        super({ key: 'WorldSelectScene' });
+    }
+
+    create() {
+        const { width, height } = this.cameras.main;
+
+        if (!progressManager) {
+            progressManager = new ProgressManager();
+        }
+
+        // Background
+        const bg = this.add.graphics();
+        bg.fillGradientStyle(0x1a1a2e, 0x1a1a2e, 0x2d1b4e, 0x4a2c6e, 1);
+        bg.fillRect(0, 0, width, height);
+
+        // Title
+        this.add.text(width / 2, 30, '选择世界', {
+            fontSize: '32px',
+            fontFamily: 'Arial',
+            fontStyle: 'bold',
+            color: '#ffd700',
+            stroke: '#333',
+            strokeThickness: 3
+        }).setOrigin(0.5);
+
+        this.add.text(width / 2, 62, `存档进度：世界 ${progressManager.progress.currentWorld}`, {
+            fontSize: '14px',
+            fontFamily: 'Arial',
+            color: '#dda0dd'
+        }).setOrigin(0.5);
+
+        // World nodes - 2 rows × 3 columns
+        const worldNames = [
+            { id: 1, title: '职业', en: 'People at Work', icon: '👩‍⚕️' },
+            { id: 2, title: '情绪', en: 'How do you feel?', icon: '😊' },
+            { id: 3, title: '才能', en: 'Talent Show', icon: '⭐' },
+            { id: 4, title: '植物', en: 'Plant Life', icon: '🌻' },
+            { id: 5, title: '校园', en: 'School Events', icon: '🏫' },
+            { id: 6, title: '服装', en: 'Cool Clothes', icon: '👗' },
+        ];
+
+        const startX = width / 2 - 200;
+        const startY = 110;
+        const colGap = 200;
+        const rowGap = 150;
+
+        worldNames.forEach((world, i) => {
+            const col = i % 3;
+            const row = Math.floor(i / 3);
+            const wx = startX + col * colGap;
+            const wy = startY + row * rowGap;
+
+            const worldData = progressManager.progress.worlds[world.id];
+            const isUnlocked = worldData && worldData.unlocked;
+
+            // World card
+            const card = this.add.graphics();
+            const cardW = 170;
+            const cardH = 120;
+
+            if (isUnlocked) {
+                card.fillStyle(0xffffff, 0.15);
+                card.fillRoundedRect(wx - cardW / 2, wy - cardH / 2, cardW, cardH, 12);
+                card.lineStyle(2, UNITS[world.id] ? UNITS[world.id].bgColor : 0xffd700);
+                card.strokeRoundedRect(wx - cardW / 2, wy - cardH / 2, cardW, cardH, 12);
+            } else {
+                card.fillStyle(0x333333, 0.5);
+                card.fillRoundedRect(wx - cardW / 2, wy - cardH / 2, cardW, cardH, 12);
+                card.lineStyle(2, 0x555555);
+                card.strokeRoundedRect(wx - cardW / 2, wy - cardH / 2, cardW, cardH, 12);
+            }
+
+            // World icon
+            const icon = this.add.text(wx, wy - 20, world.icon, {
+                fontSize: '36px'
+            }).setOrigin(0.5).setAlpha(isUnlocked ? 1 : 0.3);
+
+            // World name
+            const nameText = this.add.text(wx, wy + 20, `世界${world.id}`, {
+                fontSize: '16px',
+                fontFamily: 'Arial',
+                fontStyle: 'bold',
+                color: isUnlocked ? '#ffffff' : '#666666'
+            }).setOrigin(0.5);
+
+            const cnText = this.add.text(wx, wy + 38, world.title, {
+                fontSize: '13px',
+                fontFamily: 'Arial',
+                color: isUnlocked ? '#dda0dd' : '#555555'
+            }).setOrigin(0.5);
+
+            // Lock icon for locked worlds
+            if (!isUnlocked) {
+                const lock = this.add.text(wx, wy - 45, '🔒', {
+                    fontSize: '18px'
+                }).setOrigin(0.5);
+            }
+
+            // Interactive zone
+            if (isUnlocked) {
+                const zone = this.add.zone(wx, wy, cardW, cardH)
+                    .setInteractive({ useHandCursor: true });
+
+                zone.on('pointerover', () => {
+                    card.clear();
+                    card.fillStyle(0xffffff, 0.25);
+                    card.fillRoundedRect(wx - cardW / 2, wy - cardH / 2, cardW, cardH, 12);
+                    card.lineStyle(3, UNITS[world.id] ? UNITS[world.id].bgColor : 0xffd700);
+                    card.strokeRoundedRect(wx - cardW / 2, wy - cardH / 2, cardW, cardH, 12);
+                });
+
+                zone.on('pointerout', () => {
+                    card.clear();
+                    card.fillStyle(0xffffff, 0.15);
+                    card.fillRoundedRect(wx - cardW / 2, wy - cardH / 2, cardW, cardH, 12);
+                    card.lineStyle(2, UNITS[world.id] ? UNITS[world.id].bgColor : 0xffd700);
+                    card.strokeRoundedRect(wx - cardW / 2, wy - cardH / 2, cardW, cardH, 12);
+                });
+
+                zone.on('pointerdown', () => {
+                    // Determine level type for first level
+                    this.cameras.main.fadeOut(400, 0, 0, 0);
+                    this.time.delayedCall(400, () => {
+                        this.scene.start('GameScene', {
+                            world: world.id,
+                            level: 1,
+                            type: 'vocabulary'
+                        });
+                    });
+                });
+            }
+        });
+
+        // Reset progress button (bottom)
+        const resetY = height - 30;
+        this.add.text(width / 2, resetY, '重置进度', {
+            fontSize: '12px',
+            fontFamily: 'Arial',
+            color: '#888888'
+        }).setOrigin(0.5).setInteractive({ useHandCursor: true })
+            .on('pointerover', function () { this.setColor('#ff6b6b'); })
+            .on('pointerout', function () { this.setColor('#888888'); })
+            .on('pointerdown', () => {
+                progressManager.resetProgress();
+                this.scene.restart();
+            }, this);
+
+        // Fade in
+        this.cameras.main.fadeIn(400);
+    }
+}
+class GameScene extends Phaser.Scene {
+    constructor() {
+        super({ key: 'GameScene' });
+    }
+
+    init(data) {
+        this.worldNum = data.world || 1;
+        this.levelNum = data.level || 1;
+        this.levelType = data.type || 'vocabulary';
+        this.totalCoins = 0;
+        this.collectedCoins = 0;
+        this.questionsAnswered = 0;
+        this.correctAnswers = 0;
+        this._flagTriggered = false;
+        this._levelComplete = false;
+        this.flagReached = false;
+    }
+
+    create() {
+        try {
+            this._doCreate();
+        } catch (e) {
+            console.error('GameScene create error:', e);
+            // Show error text on screen
+            this.add.text(400, 240, '加载失败: ' + e.message, {
+                fontSize: '16px', fontFamily: 'Arial', color: '#ff0000',
+                wordWrap: { width: 700 }, align: 'center'
+            }).setOrigin(0.5);
+        }
+    }
+
+    _doCreate() {
+        const { width, height } = this.cameras.main;
+
+        // Dynamic world background color
+        const worldColors = [
+            0x87ceeb, 0xffdab9, 0xdda0dd, 0x90ee90, 0xfffacd, 0xffb6c1
+        ];
+        this.cameras.main.setBackgroundColor(worldColors[this.worldNum - 1] || 0x87ceeb);
+
+        // Init audio (safe)
+        try { if (!audioManager) audioManager = new AudioManager(); } catch (e) {}
+
+        // Init quiz system
+        const unitData = UNITS[this.worldNum] || UNITS[1];
+        this.quizManager = new QuizManager(unitData);
+        this.questionUI = new QuestionUI(this);
+
+        // Build level
+        this.buildLevel();
+
+        // Spawn player
+        this.player = new Player(this, 80, 300);
+        this.cameras.main.startFollow(this.player, true, 0.1, 0.1);
+        this.cameras.main.setBounds(0, 0, this.levelWidth, height);
+        this.physics.world.setBounds(0, 0, this.levelWidth, height);
+
+        // Setup collisions
+        this.physics.add.collider(this.player, this.platforms);
+        this.physics.add.collider(this.player, this.groundGroup);
+
+        if (this.questionBlocks) {
+            this.physics.add.collider(this.player, this.questionBlocks, this.hitQuestionBlock, null, this);
+        }
+
+        if (this.coins) {
+            this.physics.add.overlap(this.player, this.coins, this.collectCoin, null, this);
+        }
+
+        if (this.enemies) {
+            this.physics.add.collider(this.player, this.enemies, this.touchEnemy, null, this);
+            this.physics.add.collider(this.enemies, this.groundGroup);
+            this.physics.add.collider(this.enemies, this.platforms);
+        }
+
+        // Enemy projectile group
+        this._enemyProjectiles = this.physics.add.group();
+        this.physics.add.overlap(this.player, this._enemyProjectiles, this.hitByProjectile, null, this);
+
+        // Player growth tracking
+        this._consecutiveCorrect = 0;
+        this._playerGrown = false;
+
+        // Flag trigger physics overlap (in addition to x-position check)
+        if (this.flagTrigger) {
+            this.physics.add.overlap(this.player, this.flagTrigger, () => {
+                if (!this._flagTriggered) {
+                    this._flagTriggered = true;
+                    console.log('Flag overlap detected!');
+                    this.flagReached = true;
+                    this.reachFlag();
+                }
+            }, null, this);
+        }
+
+        // HUD
+        this.createHUD();
+
+        // Manual flag trigger key (press 'F' in game to test level completion)
+        this.fKey = this.input.keyboard.addKey('F');
+        this.fKey.on('down', () => {
+            if (!this.flagReached) {
+                console.log('Manual flag trigger via F key!');
+                this.flagReached = true;
+                this.reachFlag();
+            }
+        });
+
+        // Fade in
+        this.cameras.main.fadeIn(500, 255, 255, 255);
+    }
+
+    buildLevel() {
+        const { height } = this.cameras.main;
+
+        this.levelWidth = 3200;
+
+        // Ground
+        this.groundGroup = this.physics.add.staticGroup();
+        const groundTiles = Math.ceil(this.levelWidth / TILE_SIZE);
+        for (let i = 0; i < groundTiles; i++) {
+            const tile = this.groundGroup.create(i * TILE_SIZE + 16, height - 16, 'ground');
+            tile.setDisplaySize(TILE_SIZE, TILE_SIZE);
+            tile.refreshBody();
+        }
+
+        // Physics groups
+        this.platforms = this.physics.add.staticGroup();
+        this.questionBlocks = this.physics.add.staticGroup();
+        this.coins = this.physics.add.group();
+        this.enemies = this.physics.add.group();
+
+        // Different layouts per level type
+        const layout = this.getLayoutConfig(height);
+        this.buildPlatforms(layout);
+        this.buildQuestionBlocks(layout);
+        this.buildCoins(layout);
+        this.buildEnemies(layout);
+
+        // Flag at end - texture-based, non-overlapping with trigger
+        this._flagX = this.levelWidth - 120;
+        this._flagY = height - 85;
+
+        this.flag = this.add.image(this._flagX, this._flagY, 'flag').setDepth(10);
+        this.flagReached = false;
+        this.tweens.add({
+            targets: this.flag,
+            y: this._flagY - 10,
+            duration: 600,
+            yoyo: true,
+            repeat: -1,
+            ease: 'Sine.easeInOut'
+        });
+
+        // Invisible flag trigger zone (uses sparkle texture, NOT flag texture)
+        this.flagTrigger = this.physics.add.staticGroup();
+        const trig = this.flagTrigger.create(this._flagX, this._flagY + 20, 'sparkle');
+        trig.setAlpha(0).setScale(5);
+        trig.body.setSize(60, 120);
+        trig.setDepth(1);
+
+        // Boss level: spawn boss near the flag
+        if (this.levelType === 'boss') {
+            this._boss = new Boss(this, this.levelWidth - 500, height - 130);
+            this.physics.add.collider(this.player, this._boss._bodySprite);
+
+            // Boss question blocks (3 floating around boss)
+            this._bossBlocks = [];
+            for (let i = 0; i < 3; i++) {
+                const bx = this._boss.x - 60 + i * 60;
+                const by = this._boss.y - 60;
+                const block = this.questionBlocks.create(bx, by, 'question_block');
+                block.setDisplaySize(TILE_SIZE, TILE_SIZE);
+                block.refreshBody();
+                block.isActive = true;
+                block.isBossBlock = true;
+                this._bossBlocks.push(block);
+            }
+        }
+
+        this.addDecorations(height);
+    }
+
+    getLayoutConfig(height) {
+        const baseX = 300;
+        const gap = 180;
+        const type = this.levelType;
+
+        const configs = {
+            // Level 1: Vocabulary - gentle intro, many question blocks
+            vocabulary: {
+                platforms: [
+                    [350, 390, 3], [550, 340, 3], [740, 320, 3],
+                    [940, 360, 4], [1160, 390, 3], [1380, 350, 4],
+                    [1600, 380, 3], [1820, 340, 5], [2060, 380, 3], [2300, 390, 3],
+                ],
+                questionBlocks: [
+                    [380, 330], [580, 280], [770, 260],
+                    [970, 300], [1190, 330], [1410, 290],
+                    [1630, 320], [1850, 280], [2090, 320], [2330, 330],
+                ],
+                coins: { count: 10, startX: 450, spacing: 220, ys: [430, 400, 370, 340, 310] },
+                enemies: [{ x: 500, type: 'ground' }, { x: 1100, type: 'ground' }, { x: 1700, type: 'speedy' }, { x: 2300, type: 'ground' }],
+            },
+            // Level 2: Sentence - gentle intro, flying enemies
+            sentence: {
+                platforms: [
+                    [300, 390, 3], [520, 350, 2], [700, 380, 3],
+                    [920, 330, 2], [1100, 370, 4], [1340, 310, 3],
+                    [1560, 360, 4], [1800, 320, 3], [2020, 380, 3], [2260, 350, 3],
+                    [2500, 390, 3],
+                ],
+                questionBlocks: [
+                    [330, 330], [550, 290], [730, 320],
+                    [950, 270], [1130, 310], [1370, 250],
+                    [1590, 300], [1830, 260], [2050, 320], [2290, 290],
+                ],
+                coins: { count: 8, startX: 400, spacing: 280, ys: [420, 380, 340, 300, 360] },
+                enemies: [{ x: 700, type: 'flying' }, { x: 1500, type: 'ground' }],
+            },
+            // Level 3: Grammar - more challenging with shooters
+            grammar: {
+                platforms: [
+                    [300, 390, 3], [500, 340, 2], [680, 380, 3],
+                    [880, 310, 2], [1040, 360, 3], [1240, 300, 2],
+                    [1420, 350, 4], [1660, 290, 2], [1840, 370, 3],
+                    [2060, 320, 3], [2300, 380, 3],
+                ],
+                questionBlocks: [
+                    [330, 330], [530, 280], [710, 320],
+                    [910, 250], [1070, 300], [1270, 240],
+                    [1450, 290], [1690, 230], [1870, 310], [2090, 260],
+                ],
+                coins: { count: 6, startX: 420, spacing: 350, ys: [400, 350, 310, 290] },
+                enemies: [{ x: 550, type: 'speedy' }, { x: 1050, type: 'shooter' }, { x: 1550, type: 'flying' }, { x: 2100, type: 'ground' }],
+            },
+            // Level 4: Boss - intense, all enemy types
+            boss: {
+                platforms: [
+                    [300, 380, 3], [500, 350, 3], [720, 320, 2],
+                    [900, 370, 4], [1140, 340, 2], [1320, 310, 3],
+                    [1540, 360, 4], [1780, 330, 3], [2020, 290, 2],
+                    [2220, 350, 3], [2480, 380, 3],
+                ],
+                questionBlocks: [
+                    [330, 320], [530, 290], [750, 260],
+                    [930, 310], [1170, 280], [1350, 250],
+                    [1570, 300], [1810, 270], [2050, 230], [2250, 290],
+                ],
+                coins: { count: 4, startX: 500, spacing: 600, ys: [370, 330, 300] },
+                enemies: [
+                    { x: 400, type: 'speedy' }, { x: 800, type: 'shooter' }, { x: 1200, type: 'flying' },
+                    { x: 1600, type: 'shooter' }, { x: 2000, type: 'speedy' }, { x: 2400, type: 'ground' },
+                ],
+            },
+        };
+
+        return configs[type] || configs.vocabulary;
+    }
+
+    buildPlatforms(layout) {
+        layout.platforms.forEach(([x, y, count]) => this.createPlatform(x, y, count));
+    }
+
+    buildQuestionBlocks(layout) {
+        layout.questionBlocks.forEach(([x, y]) => this.createQuestionBlock(x, y));
+    }
+
+    buildCoins(layout) {
+        const cfg = layout.coins;
+        for (let i = 0; i < cfg.count; i++) {
+            const cx = cfg.startX + i * cfg.spacing;
+            const cy = cfg.ys[i % cfg.ys.length];
+            const coin = this.coins.create(cx, cy, 'coin');
+            coin.body.setAllowGravity(false);
+            this.tweens.add({
+                targets: coin,
+                y: cy - 6,
+                duration: 700,
+                yoyo: true,
+                repeat: -1,
+                ease: 'Sine.easeInOut'
+            });
+            this.totalCoins++;
+        }
+    }
+
+    buildEnemies(layout) {
+        const h = this.cameras.main.height;
+        layout.enemies.forEach(({ x, type }) => {
+            const eType = type || 'ground';
+            const y = eType === 'flying' ? h - 140 : h - 60;
+            this.createEnemy(x, y, eType);
+        });
+    }
+
+    createPlatform(x, y, tileCount) {
+        for (let i = 0; i < tileCount; i++) {
+            const tile = this.platforms.create(x + i * TILE_SIZE + 16, y, 'platform');
+            tile.setDisplaySize(TILE_SIZE, 16);
+            tile.refreshBody();
+        }
+    }
+
+    createQuestionBlock(x, y) {
+        const block = this.questionBlocks.create(x, y, 'question_block');
+        block.setDisplaySize(TILE_SIZE, TILE_SIZE);
+        block.refreshBody();
+        block.isActive = true;
+        return block;
+    }
+
+    createEnemy(x, y, type) {
+        const enemyType = type || 'ground';
+        // Create via group to ensure physics body is properly configured
+        const enemy = this.enemies.create(x, y, 'enemy');
+        enemy.body.setAllowGravity(enemyType !== 'flying');
+        enemy.body.setBounce(0);
+        enemy.enemyType = enemyType;
+        enemy.startX = x;
+        enemy.startY = y;
+        enemy._shootTimer = 0;
+
+        // Set visual and movement based on type
+        switch (enemyType) {
+            case 'flying':
+                enemy.setTint(0xff6b6b);
+                enemy.body.setAllowGravity(false);
+                enemy.body.setVelocityY(50);
+                enemy.patrolRange = 60;
+                enemy._initVelY = 50;
+                break;
+            case 'shooter':
+                enemy.setTint(0xff9800);
+                enemy.body.setVelocityX(30);
+                enemy.patrolRange = 60;
+                enemy._shootTimer = Phaser.Math.Between(2000, 4000);
+                break;
+            case 'speedy':
+                enemy.setTint(0x00bcd4);
+                enemy.setScale(0.7);
+                enemy.body.setVelocityX(80);
+                enemy.patrolRange = 120;
+                break;
+            default:
+                enemy.setTint(0x9932cc);
+                enemy.body.setVelocityX(40);
+                enemy.patrolRange = 80;
+                break;
+        }
+        return enemy;
+    }
+
+    spawnPenaltyEnemy(x, y) {
+        const enemy = this.createEnemy(x, y - 60);
+        // Drop from above
+        enemy.y = y - 100;
+        enemy.body.setVelocityY(100);
+    }
+
+    addDecorations(height) {
+        const type = this.levelType;
+
+        // Different bush colors per level type
+        const bushColors = {
+            vocabulary: 0x228b22, sentence: 0x7ec850, grammar: 0x2e7d32, boss: 0x4a148c
+        };
+        const bushColor = bushColors[type] || 0x228b22;
+
+        for (let i = 0; i < 20; i++) {
+            const bx = 100 + i * 160;
+            const bush = this.add.graphics();
+            bush.fillStyle(bushColor, 0.6);
+            bush.fillCircle(bx, height - 58, 8);
+            bush.fillCircle(bx + 8, height - 56, 10);
+            bush.fillCircle(bx - 6, height - 56, 7);
+        }
+
+        // Different background elements per level type
+        if (type === 'sentence') {
+            // Floating word bubbles in background
+            for (let i = 0; i < 6; i++) {
+                const fx = 150 + i * 500;
+                const fy = 60 + (i % 3) * 50;
+                const bubble = this.add.graphics();
+                bubble.fillStyle(0xdda0dd, 0.25);
+                bubble.fillRoundedRect(fx - 30, fy - 12, 60, 24, 12);
+                bubble.setScrollFactor(0.2);
+            }
+        } else if (type === 'grammar') {
+            // Question marks in background
+            for (let i = 0; i < 5; i++) {
+                const qx = 200 + i * 600;
+                const qy = 50 + (i % 2) * 60;
+                const qmark = this.add.text(qx, qy, '?', {
+                    fontSize: '40px', fontFamily: 'Arial', fontStyle: 'bold',
+                    color: '#ff69b4'
+                }).setAlpha(0.15).setScrollFactor(0.2);
+            }
+        } else if (type === 'boss') {
+            // Warning stripes at bottom
+            for (let i = 0; i < 8; i++) {
+                const sx = i * 400;
+                const stripe = this.add.graphics();
+                stripe.fillStyle(0xff0000, 0.15);
+                stripe.fillRect(sx, height - 70, 200, 8);
+                stripe.setScrollFactor(0.3);
+            }
+        }
+
+        // Background clouds (vary count and position by type)
+        const cloudCount = type === 'boss' ? 10 : type === 'grammar' ? 6 : 8;
+        for (let i = 0; i < cloudCount; i++) {
+            const cx = i * (3200 / cloudCount) + 100;
+            const cy = 30 + (i % 3) * 40;
+            const cloud = this.add.graphics();
+            const alpha = type === 'boss' ? 0.3 : 0.5;
+            cloud.fillStyle(0xffffff, alpha);
+            cloud.fillCircle(cx, cy, 15);
+            cloud.fillCircle(cx + 15, cy - 3, 20);
+            cloud.fillCircle(cx + 30, cy, 15);
+            cloud.setScrollFactor(type === 'boss' ? 0.5 : 0.3);
+        }
+    }
+
+    createHUD() {
+        const hudY = 16;
+
+        // Coin counter
+        this.coinIcon = this.add.image(30, hudY + 8, 'coin').setScrollFactor(0).setDepth(100);
+        this.coinText = this.add.text(46, hudY, '0', {
+            fontSize: '18px',
+            fontFamily: 'Arial',
+            color: '#ffffff',
+            stroke: '#333333',
+            strokeThickness: 2
+        }).setScrollFactor(0).setDepth(100);
+
+        // Hearts
+        this.hearts = [];
+        for (let i = 0; i < 3; i++) {
+            const heart = this.add.image(160 + i * 28, hudY + 8, 'heart').setScrollFactor(0).setDepth(100);
+            this.hearts.push(heart);
+        }
+
+        // Level info with type name
+        const typeNames = { vocabulary: '单词收集', sentence: '连词成句', grammar: '语法选择', boss: 'Boss挑战' };
+        this.add.text(700, hudY, `世界${this.worldNum} - 第${this.levelNum}关`, {
+            fontSize: '14px',
+            fontFamily: 'Arial',
+            color: '#ffffff',
+            stroke: '#333333',
+            strokeThickness: 2
+        }).setScrollFactor(0).setDepth(100);
+        this.add.text(700, hudY + 18, typeNames[this.levelType] || '', {
+            fontSize: '11px',
+            fontFamily: 'Arial',
+            color: '#ffd700',
+            stroke: '#333333',
+            strokeThickness: 1
+        }).setScrollFactor(0).setDepth(100);
+        // HIGHLY VISIBLE version marker
+        const vbg = this.add.graphics().setScrollFactor(0).setDepth(200);
+        vbg.fillStyle(0xff0000, 1);
+        vbg.fillRect(0, 0, 40, 20);
+        this.add.text(20, 10, 'v15', {
+            fontSize: '14px', fontFamily: 'Arial', fontStyle: 'bold', color: '#ffffff'
+        }).setOrigin(0.5).setScrollFactor(0).setDepth(201);
+
+        // DEBUG: show player position
+        this.debugText = this.add.text(300, 60, '', {
+            fontSize: '16px', fontFamily: 'Arial', fontStyle: 'bold',
+            color: '#ffff00', stroke: '#000000', strokeThickness: 3
+        }).setScrollFactor(0).setDepth(200);
+    }
+
+    hitQuestionBlock(player, block) {
+        if (!block.isActive) return;
+
+        // Only trigger when player hits from below
+        if (!player.body.touching.up) return;
+
+        block.isActive = false;
+        block.setTexture('question_block_hit');
+
+        // Bounce animation
+        this.tweens.add({
+            targets: block,
+            y: block.y - 8,
+            duration: 80,
+            yoyo: true,
+            ease: 'Quad.easeOut'
+        });
+
+        // Generate question based on level type
+        const typeMap = {
+            vocabulary: 'vocabulary',
+            listening: 'listening',
+            sentence: 'sentence',
+            grammar: 'grammar',
+            boss: 'vocabulary'
+        };
+        const qType = typeMap[this.levelType] || 'vocabulary';
+
+        let actualType = qType;
+        const questionCount = this.questionsAnswered || 0;
+        if (this.levelType === 'vocabulary') {
+            actualType = questionCount % 3 === 0 ? 'vocabulary'
+                : questionCount % 3 === 1 ? 'listening'
+                : 'phonics';
+        } else if (this.levelType === 'grammar') {
+            actualType = questionCount % 2 === 0 ? 'grammar' : 'vocabulary';
+        }
+
+        const isBossBlock = block.isBossBlock === true;
+        const question = this.quizManager.generateQuestion(actualType);
+
+        this.questionUI.show(question, (correct) => {
+            this.questionsAnswered++;
+
+            if (correct) {
+                this.correctAnswers++;
+                this.collectedCoins++;
+                this._consecutiveCorrect++;
+                // Grow player after 3 consecutive correct answers
+                if (this._consecutiveCorrect >= 3 && !this._playerGrown) {
+                    this.growPlayer();
+                }
+                this.coinText.setText(this.collectedCoins.toString());
+                if (audioManager) audioManager.sfxCorrect();
+
+                // Coin effect
+                const coin = this.add.image(block.x, block.y - 20, 'coin');
+                this.tweens.add({
+                    targets: coin,
+                    y: block.y - 70,
+                    alpha: 0,
+                    duration: 500,
+                    ease: 'Quad.easeOut',
+                    onComplete: () => coin.destroy()
+                });
+
+                const posText = this.add.text(block.x, block.y - 40, '+1 ⭐', {
+                    fontSize: '16px',
+                    fontFamily: 'Arial',
+                    color: '#ffd700',
+                    stroke: '#333',
+                    strokeThickness: 2
+                }).setOrigin(0.5);
+                this.tweens.add({
+                    targets: posText,
+                    y: block.y - 70,
+                    alpha: 0,
+                    duration: 800,
+                    onComplete: () => posText.destroy()
+                });
+
+                // Boss block: damage boss on correct answer
+                if (isBossBlock && this._boss && !this._boss.defeated) {
+                    this._boss.takeDamage();
+                    if (this._boss.defeated) {
+                        // Show message that flag is now accessible
+                        const unlockText = this.add.text(this._boss.x, this._boss.y - 80, '旗帜已解锁! 冲向终点!', {
+                            fontSize: '16px',
+                            fontFamily: 'Arial',
+                            fontStyle: 'bold',
+                            color: '#ffd700',
+                            stroke: '#333',
+                            strokeThickness: 3
+                        }).setOrigin(0.5);
+                        this.tweens.add({
+                            targets: unlockText,
+                            y: unlockText.y - 30,
+                            alpha: 0,
+                            duration: 2000,
+                            onComplete: () => unlockText.destroy()
+                        });
+                    }
+                }
+            } else {
+                this._consecutiveCorrect = 0;
+                if (audioManager) audioManager.sfxWrong();
+                this.spawnPenaltyEnemy(block.x, block.y);
+            }
+        });
+    }
+
+    collectCoin(player, coin) {
+        coin.destroy();
+        this.collectedCoins++;
+        this.coinText.setText(this.collectedCoins.toString());
+        if (audioManager) audioManager.sfxCoin();
+
+        // Sparkle effect
+        const sparkle = this.add.image(coin.x, coin.y, 'sparkle');
+        this.tweens.add({
+            targets: sparkle,
+            alpha: 0,
+            scale: 1.5,
+            duration: 300,
+            onComplete: () => sparkle.destroy()
+        });
+    }
+
+    hitByProjectile(player, proj) {
+        proj.destroy();
+        player.takeDamage();
+        this.updateHearts();
+    }
+
+    growPlayer() {
+        if (this._playerGrown) return;
+        this._playerGrown = true;
+        this.player.setScale(1.5);
+        // Grow back after 8 seconds
+        this.time.delayedCall(8000, () => {
+            if (this.player && this.player.active) {
+                this.player.setScale(1);
+                this._playerGrown = false;
+            }
+        });
+        // Show growth message
+        const msg = this.add.text(this.player.x, this.player.y - 50, '变大啦!', {
+            fontSize: '16px', fontFamily: 'Arial', fontStyle: 'bold',
+            color: '#ffd700', stroke: '#333', strokeThickness: 3
+        }).setOrigin(0.5);
+        this.tweens.add({
+            targets: msg, y: msg.y - 30, alpha: 0, duration: 1200,
+            onComplete: () => msg.destroy()
+        });
+    }
+
+    touchEnemy(player, enemy) {
+        // If player is jumping on top of enemy
+        if (player.body.velocity.y > 0 && player.body.bottom <= enemy.body.top + 15) {
+            // Stomp enemy
+            enemy.destroy();
+            player.setVelocityY(-250);
+            if (audioManager) audioManager.sfxStomp();
+
+            // Score popup
+            const text = this.add.text(enemy.x, enemy.y - 20, '+10', {
+                fontSize: '16px',
+                fontFamily: 'Arial',
+                color: '#ffd700',
+                stroke: '#333333',
+                strokeThickness: 2
+            }).setOrigin(0.5);
+
+            this.tweens.add({
+                targets: text,
+                y: enemy.y - 50,
+                alpha: 0,
+                duration: 600,
+                onComplete: () => text.destroy()
+            });
+        } else {
+            // Take damage
+            player.takeDamage();
+            this.updateHearts();
+        }
+    }
+
+    reachFlag() {
+        if (this._levelComplete) return;
+        this._levelComplete = true;
+        console.log('reachFlag called! Starting level complete sequence...');
+
+        this.physics.pause();
+        this.player.setVelocityX(0);
+        this.player.setVelocityY(0);
+        if (audioManager) audioManager.sfxLevelComplete();
+
+        const fx = this._flagX || 400;
+        const fy = this._flagY ? this._flagY - 50 : 240;
+
+        // Victory popup
+        const text = this.add.text(fx, fy - 80, '过关啦!', {
+            fontSize: '24px',
+            fontFamily: 'Arial',
+            fontStyle: 'bold',
+            color: '#ffd700',
+            stroke: '#333333',
+            strokeThickness: 3
+        }).setOrigin(0.5);
+
+        this.tweens.add({
+            targets: text,
+            scale: 1.2,
+            duration: 400,
+            yoyo: true,
+            repeat: 2,
+            onComplete: () => {
+                this.scene.start('ResultScene', {
+                    world: this.worldNum,
+                    level: this.levelNum,
+                    coins: this.collectedCoins,
+                    totalCoins: this.totalCoins,
+                    correct: this.correctAnswers,
+                    total: this.questionsAnswered,
+                    lives: this.player.lives
+                });
+            }
+        });
+    }
+
+    updateHearts() {
+        for (let i = 0; i < this.hearts.length; i++) {
+            this.hearts[i].setAlpha(i < this.player.lives ? 1 : 0.2);
+        }
+    }
+
+    enemyShoot(enemy) {
+        if (!enemy.active) return;
+        const proj = this.add.circle(enemy.x, enemy.y, 6, 0xff0000);
+        proj.setDepth(5);
+        this.physics.add.existing(proj);
+        proj.body.setAllowGravity(false);
+        const player = this.player;
+        const dirX = player ? (player.x < enemy.x ? -1 : 1) : -1;
+        proj.body.setVelocity(dirX * 150, -60);
+        this._enemyProjectiles.add(proj);
+        this.time.delayedCall(3000, () => {
+            if (proj.active) proj.destroy();
+        });
+    }
+
+    resetPlayer() {
+        // Reset player state without restarting scene (preserves keyboard state)
+        this.player.x = 80;
+        this.player.y = 300;
+        this.player.lives = 3;
+        this.player.clearTint();
+        if (this.player.body) {
+            this.player.body.checkCollision.none = false;
+            this.player.body.setVelocity(0, 0);
+        }
+        this.updateHearts();
+        this.physics.resume();
+        console.log('Player reset to start position');
+    }
+
+    update() {
+        if (!this.player || !this.player.active) return;
+
+        this.player.update();
+
+        // Flag detection - requires minimum coins
+        const flagX = 2600;
+        const distToFlag = this._flagX ? Math.abs(this.player.x - this._flagX) : 9999;
+        const minCoins = Math.max(1, Math.floor(this.totalCoins * 0.3));
+        const coinGateMet = this.collectedCoins >= minCoins;
+
+        // Boss gate: boss must be defeated for boss levels
+        const bossGateMet = this.levelType !== 'boss' || (this._boss && this._boss.defeated);
+
+        if (this.debugText) {
+            this.debugText.setText('玩家:' + Math.round(this.player.x)
+                + ' 旗:' + flagX
+                + ' 币:' + this.collectedCoins + '/' + minCoins
+                + (this.levelType === 'boss' ? ' Boss:' + (this._boss ? this._boss.hp : '?') : '')
+                + ' (' + this.levelType + ')');
+        }
+
+        if (!this.flagReached && !this._levelComplete && coinGateMet && bossGateMet) {
+            if (this.player.x > flagX || distToFlag < 80) {
+                this.flagReached = true;
+                this.reachFlag();
+            }
+        }
+
+        // Enemy patrol + update (handles all 4 types directly)
+        const now = this.time.now;
+        const dt = this.game.loop.delta;
+        this.enemies.getChildren().forEach(enemy => {
+            if (!enemy.active) return;
+            const eType = enemy.enemyType || 'ground';
+            const range = enemy.patrolRange || 80;
+
+            switch (eType) {
+                case 'flying':
+                    if (enemy.y < enemy.startY - range) {
+                        enemy.body.setVelocityY(50);
+                    } else if (enemy.y > enemy.startY + range) {
+                        enemy.body.setVelocityY(-50);
+                    } else if (Math.abs(enemy.body.velocity.y) < 1) {
+                        // Restore velocity if zeroed by collision
+                        enemy.body.setVelocityY(enemy._initVelY || 50);
+                    }
+                    break;
+                case 'shooter':
+                    if (enemy.x > enemy.startX + range) {
+                        enemy.body.setVelocityX(-30);
+                    } else if (enemy.x < enemy.startX - range) {
+                        enemy.body.setVelocityX(30);
+                    }
+                    enemy._shootTimer -= dt;
+                    if (enemy._shootTimer <= 0) {
+                        this.enemyShoot(enemy);
+                        enemy._shootTimer = Phaser.Math.Between(3000, 5000);
+                    }
+                    break;
+                case 'speedy':
+                    if (enemy.x > enemy.startX + range) {
+                        enemy.body.setVelocityX(-80);
+                        enemy.setFlipX(true);
+                    } else if (enemy.x < enemy.startX - range) {
+                        enemy.body.setVelocityX(80);
+                        enemy.setFlipX(false);
+                    }
+                    break;
+                default: // ground
+                    if (enemy.x > enemy.startX + range) {
+                        enemy.body.setVelocityX(-40);
+                    } else if (enemy.x < enemy.startX - range) {
+                        enemy.body.setVelocityX(40);
+                    }
+                    break;
+            }
+        });
+
+        // Cleanup off-screen projectiles
+        if (this._enemyProjectiles) {
+            this._enemyProjectiles.getChildren().forEach(p => {
+                if (!p.active || p.y > 600 || p.x < this.player.x - 800 || p.x > this.player.x + 900) {
+                    p.destroy();
+                }
+            });
+        }
+
+        // Update HUD
+        this.coinText.setText(this.collectedCoins.toString());
+    }
+}
+class QuestionUI {
+    constructor(scene) {
+        this.scene = scene;
+        this.isOpen = false;
+        this.container = null;
+        this.audioMgr = null;
+    }
+
+    show(questionData, onAnswer) {
+        if (this.isOpen) return;
+        this.isOpen = true;
+
+        const scene = this.scene;
+        const { width, height } = scene.cameras.main;
+
+        // Pause game physics
+        scene.physics.pause();
+
+        // Ensure we have an audio manager
+        if (!this.audioMgr) {
+            this.audioMgr = new AudioManager();
+        }
+
+        // Dark overlay
+        this.overlay = scene.add.rectangle(width / 2, height / 2, width, height, 0x000000, 0.6)
+            .setScrollFactor(0).setDepth(200);
+
+        // Container for question elements
+        const elements = [];
+
+        // Question panel background
+        const panelW = 500;
+        const panelH = questionData.type === 'sentence' ? 420 : 300;
+        const panelX = width / 2;
+        const panelY = height / 2;
+
+        const panel = scene.add.graphics().setScrollFactor(0).setDepth(201);
+        panel.fillStyle(0xffffff, 0.95);
+        panel.fillRoundedRect(panelX - panelW / 2, panelY - panelH / 2, panelW, panelH, 16);
+        panel.lineStyle(3, 0xff69b4);
+        panel.strokeRoundedRect(panelX - panelW / 2, panelY - panelH / 2, panelW, panelH, 16);
+        elements.push(panel);
+
+        // Question type badge
+        const typeLabels = {
+            vocabulary: '单词',
+            listening: '听力',
+            sentence: '句型',
+            grammar: '语法',
+            phonics: '语音'
+        };
+        const badgeColors = {
+            vocabulary: 0xffb6c1,
+            listening: 0x87ceeb,
+            sentence: 0xdda0dd,
+            grammar: 0x90ee90,
+            phonics: 0xffd700
+        };
+        const badgeColor = badgeColors[questionData.type] || 0xffb6c1;
+        const badge = scene.add.graphics().setScrollFactor(0).setDepth(202);
+        badge.fillStyle(badgeColor);
+        badge.fillRoundedRect(panelX - 38, panelY - panelH / 2 - 10, 76, 24, 6);
+        const badgeText = scene.add.text(panelX, panelY - panelH / 2 + 2, typeLabels[questionData.type] || '题目', {
+            fontSize: '14px',
+            fontFamily: 'Arial',
+            fontStyle: 'bold',
+            color: '#ffffff',
+            stroke: '#333',
+            strokeThickness: 1
+        }).setOrigin(0.5).setScrollFactor(0).setDepth(203);
+        elements.push(badge, badgeText);
+
+        // Review badge
+        if (questionData.isReview) {
+            const rBadge = scene.add.text(panelX + 60, panelY - panelH / 2, '复习', {
+                fontSize: '12px',
+                fontFamily: 'Arial',
+                color: '#ff6b6b'
+            }).setOrigin(0.5).setScrollFactor(0).setDepth(203);
+            elements.push(rBadge);
+        }
+
+        // Question text
+        const questionText = scene.add.text(panelX, panelY - 70, questionData.question, {
+            fontSize: questionData.question.length > 30 ? '16px' : '20px',
+            fontFamily: 'Arial',
+            fontStyle: 'bold',
+            color: '#333333',
+            wordWrap: { width: panelW - 40 },
+            align: 'center'
+        }).setOrigin(0.5).setScrollFactor(0).setDepth(202);
+        elements.push(questionText);
+
+        // Sub text (phonetic or hint)
+        if (questionData.questionSub) {
+            const subText = scene.add.text(panelX, panelY - 45, questionData.questionSub, {
+                fontSize: '13px',
+                fontFamily: 'Arial',
+                color: '#888888'
+            }).setOrigin(0.5).setScrollFactor(0).setDepth(202);
+            elements.push(subText);
+        }
+
+        // Audio button (speaker icon)
+        if (questionData.audioText) {
+            const speakerBtn = scene.add.text(panelX + panelW / 2 - 40, panelY - panelH / 2 + 5, '🔊', {
+                fontSize: '22px'
+            }).setOrigin(0.5).setScrollFactor(0).setDepth(203).setInteractive({ useHandCursor: true });
+
+            speakerBtn.on('pointerdown', () => {
+                this.audioMgr.speakWord(questionData.audioText);
+                speakerBtn.setScale(1.2);
+                scene.time.delayedCall(200, () => speakerBtn.setScale(1));
+            });
+            elements.push(speakerBtn);
+        }
+
+        // Choices
+        const choiceButtons = [];
+        const choiceStartY = questionData.type === 'sentence' ? panelY - 10 : panelY;
+
+        if (questionData.type === 'sentence') {
+            // Sentence ordering: show words as draggable/clickable items
+            // For simplicity, show as multiple choice (pick the right order)
+            // Actually show individual word buttons that form the sentence
+            this.createSentenceOrderUI(scene, panelX, panelY, questionData, elements, choiceButtons, onAnswer);
+        } else {
+            // Standard multiple choice
+            const choiceLabels = ['A', 'B', 'C', 'D'];
+            const choiceColors = [0xff69b4, 0x87ceeb, 0xdda0dd, 0x90ee90];
+
+            for (let i = 0; i < questionData.choices.length; i++) {
+                const cy = choiceStartY + i * 44;
+                const btnW = panelW - 80;
+                const btnH = 36;
+
+                const btnBg = scene.add.graphics().setScrollFactor(0).setDepth(202);
+                btnBg.fillStyle(choiceColors[i], 0.2);
+                btnBg.fillRoundedRect(panelX - btnW / 2, cy - btnH / 2, btnW, btnH, 8);
+                btnBg.lineStyle(2, choiceColors[i]);
+                btnBg.strokeRoundedRect(panelX - btnW / 2, cy - btnH / 2, btnW, btnH, 8);
+
+                const labelText = scene.add.text(panelX - btnW / 2 + 16, cy, choiceLabels[i], {
+                    fontSize: '14px',
+                    fontFamily: 'Arial',
+                    fontStyle: 'bold',
+                    color: '#' + choiceColors[i].toString(16).padStart(6, '0')
+                }).setOrigin(0, 0.5).setScrollFactor(0).setDepth(203);
+
+                const choiceText = scene.add.text(panelX, cy, questionData.choices[i], {
+                    fontSize: '15px',
+                    fontFamily: 'Arial',
+                    color: '#333333'
+                }).setOrigin(0.5).setScrollFactor(0).setDepth(203);
+
+                const hitZone = scene.add.zone(panelX, cy, btnW, btnH)
+                    .setInteractive({ useHandCursor: true })
+                    .setScrollFactor(0).setDepth(204);
+
+                const idx = i;
+                hitZone.on('pointerover', () => {
+                    btnBg.clear();
+                    btnBg.fillStyle(choiceColors[idx], 0.5);
+                    btnBg.fillRoundedRect(panelX - btnW / 2, cy - btnH / 2, btnW, btnH, 8);
+                    btnBg.lineStyle(2, choiceColors[idx]);
+                    btnBg.strokeRoundedRect(panelX - btnW / 2, cy - btnH / 2, btnW, btnH, 8);
+                });
+                hitZone.on('pointerout', () => {
+                    btnBg.clear();
+                    btnBg.fillStyle(choiceColors[idx], 0.2);
+                    btnBg.fillRoundedRect(panelX - btnW / 2, cy - btnH / 2, btnW, btnH, 8);
+                    btnBg.lineStyle(2, choiceColors[idx]);
+                    btnBg.strokeRoundedRect(panelX - btnW / 2, cy - btnH / 2, btnW, btnH, 8);
+                });
+                hitZone.on('pointerdown', () => {
+                    this.handleAnswer(questionData, idx, onAnswer, elements, choiceButtons, panelX, panelY);
+                });
+
+                elements.push(btnBg, labelText, choiceText, hitZone);
+                choiceButtons.push({ bg: btnBg, zone: hitZone, texts: [labelText, choiceText] });
+            }
+        }
+
+        this.elements = elements;
+        this.choiceButtons = choiceButtons;
+    }
+
+    createSentenceOrderUI(scene, panelX, panelY, questionData, elements, choiceButtons, onAnswer) {
+        const words = questionData.choices;
+        const cols = Math.min(words.length, 4);
+        const btnW = 80;
+        const btnH = 36;
+        const gap = 48;
+        const rows = Math.ceil(words.length / cols);
+
+        const selectedOrder = [];
+        const wordSlots = [];
+        const wordButtons = [];
+
+        // Top area: selected word slots (clickable to undo)
+        const slotY = panelY - 30;
+        for (let i = 0; i < words.length; i++) {
+            const sx = panelX - ((words.length - 1) * gap) / 2 + i * gap;
+            const slot = scene.add.graphics().setScrollFactor(0).setDepth(202);
+            slot.fillStyle(0xf0f0f0, 0.5);
+            slot.fillRoundedRect(sx - btnW / 2, slotY - btnH / 2, btnW, btnH, 6);
+            slot.lineStyle(2, 0xcccccc, 0.5);
+            slot.strokeRoundedRect(sx - btnW / 2, slotY - btnH / 2, btnW, btnH, 6);
+
+            const slotText = scene.add.text(sx, slotY, '', {
+                fontSize: '14px', fontFamily: 'Arial', fontStyle: 'bold', color: '#333333'
+            }).setOrigin(0.5).setScrollFactor(0).setDepth(203);
+
+            const hitZone = scene.add.zone(sx, slotY, btnW, btnH)
+                .setInteractive({ useHandCursor: true }).setScrollFactor(0).setDepth(204);
+
+            const slotIdx = i;
+            hitZone.on('pointerdown', () => {
+                if (selectedOrder.length > slotIdx) {
+                    const removed = selectedOrder[slotIdx];
+                    selectedOrder.splice(slotIdx, 1);
+                    this.redrawSentenceSlots(wordSlots, selectedOrder);
+                    if (removed.btn) {
+                        removed.btn.selected = false;
+                        removed.btn.bg.setAlpha(1);
+                        removed.btn.text.setAlpha(1);
+                        removed.btn.zone.setInteractive({ useHandCursor: true });
+                    }
+                }
+            });
+
+            elements.push(slot, slotText, hitZone);
+            wordSlots.push({ slot, bg: slot, text: slotText, zone: hitZone, x: sx });
+        }
+
+        // Bottom area: word choices
+        const choiceStartY = panelY + 40;
+        for (let i = 0; i < words.length; i++) {
+            const col = i % cols;
+            const row = Math.floor(i / cols);
+            const cx = panelX - ((cols - 1) * (btnW + 8)) / 2 + col * (btnW + 8);
+            const cy = choiceStartY + row * (btnH + 8);
+
+            const wordBg = scene.add.graphics().setScrollFactor(0).setDepth(202);
+            wordBg.fillStyle(0xdda0dd, 0.3);
+            wordBg.fillRoundedRect(cx - btnW / 2 + 4, cy - btnH / 2, btnW, btnH, 8);
+            wordBg.lineStyle(2, 0xdda0dd);
+            wordBg.strokeRoundedRect(cx - btnW / 2 + 4, cy - btnH / 2, btnW, btnH, 8);
+
+            const wordText = scene.add.text(cx + 4, cy, words[i], {
+                fontSize: '13px', fontFamily: 'Arial', fontStyle: 'bold', color: '#8b4789'
+            }).setOrigin(0.5).setScrollFactor(0).setDepth(203);
+
+            const hitZone = scene.add.zone(cx + 4, cy, btnW, btnH)
+                .setInteractive({ useHandCursor: true }).setScrollFactor(0).setDepth(204);
+
+            const wb = { bg: wordBg, text: wordText, zone: hitZone, word: words[i], selected: false };
+            wordButtons.push(wb);
+
+            hitZone.on('pointerdown', () => {
+                if (wb.selected) return;
+                if (selectedOrder.length >= words.length) return;
+                wb.selected = true;
+                selectedOrder.push({ word: words[i], btn: wb });
+                this.redrawSentenceSlots(wordSlots, selectedOrder);
+                wb.bg.setAlpha(0.25);
+                wb.text.setAlpha(0.25);
+                wb.zone.disableInteractive();
+            });
+
+            elements.push(wordBg, wordText, hitZone);
+            choiceButtons.push({ bg: wordBg, zone: hitZone, texts: [wordText] });
+        }
+
+        // Confirm button - positioned below all word rows
+        const lastRowY = choiceStartY + (rows - 1) * (btnH + 8);
+        const confirmY = lastRowY + btnH / 2 + 28;
+        const confirmW = 140;
+        const confirmH = 36;
+        const confirmBg = scene.add.graphics().setScrollFactor(0).setDepth(202);
+        this.drawConfirmBtn(confirmBg, panelX, confirmY, confirmW, confirmH, 0x90ee90);
+        const confirmText = scene.add.text(panelX, confirmY, '✓ 确认提交', {
+            fontSize: '16px', fontFamily: 'Arial', fontStyle: 'bold', color: '#ffffff',
+            stroke: '#333', strokeThickness: 1
+        }).setOrigin(0.5).setScrollFactor(0).setDepth(203);
+        const confirmZone = scene.add.zone(panelX, confirmY, confirmW, confirmH)
+            .setInteractive({ useHandCursor: true }).setScrollFactor(0).setDepth(204);
+
+        confirmZone.on('pointerover', () => this.drawConfirmBtn(confirmBg, panelX, confirmY, confirmW, confirmH, 0xa0f0a0));
+        confirmZone.on('pointerout', () => this.drawConfirmBtn(confirmBg, panelX, confirmY, confirmW, confirmH, 0x90ee90));
+        confirmZone.on('pointerdown', () => {
+            if (selectedOrder.length === 0) return;
+            const userSentence = selectedOrder.map(s => s.word).join(' ');
+            const correctSentence = questionData.correctOrder.join(' ');
+            const isCorrect = userSentence === correctSentence;
+            this.handleAnswer(questionData, isCorrect ? 0 : -1, onAnswer, elements, choiceButtons, panelX, panelY);
+        });
+
+        elements.push(confirmBg, confirmText, confirmZone);
+        choiceButtons.push({ bg: confirmBg, zone: confirmZone, texts: [confirmText] });
+    }
+
+    redrawSentenceSlots(wordSlots, selectedOrder) {
+        wordSlots.forEach((slot, i) => {
+            // Reset all slots
+            slot.bg.clear();
+            if (i < selectedOrder.length) {
+                slot.text.setText(selectedOrder[i].word);
+                slot.bg.fillStyle(0xdda0dd, 0.3);
+                slot.bg.fillRoundedRect(slot.x - 40, slot.text.y - 18, 80, 36, 6);
+                slot.bg.lineStyle(2, 0xdda0dd);
+                slot.bg.strokeRoundedRect(slot.x - 40, slot.text.y - 18, 80, 36, 6);
+            } else {
+                slot.text.setText('');
+                slot.bg.fillStyle(0xf0f0f0, 0.5);
+                slot.bg.fillRoundedRect(slot.x - 40, slot.text.y - 18, 80, 36, 6);
+                slot.bg.lineStyle(2, 0xcccccc, 0.5);
+                slot.bg.strokeRoundedRect(slot.x - 40, slot.text.y - 18, 80, 36, 6);
+            }
+        });
+    }
+
+    drawConfirmBtn(gfx, x, y, w, h, color) {
+        gfx.clear();
+        gfx.fillStyle(color, 0.9);
+        gfx.fillRoundedRect(x - w / 2, y - h / 2, w, h, 10);
+        gfx.lineStyle(2, 0xffffff);
+        gfx.strokeRoundedRect(x - w / 2, y - h / 2, w, h, 10);
+    }
+
+    handleAnswer(questionData, userIndex, onAnswer, elements, choiceButtons, panelX, panelY) {
+        // Disable all choice buttons
+        if (choiceButtons) {
+            choiceButtons.forEach(btn => {
+                if (btn.zone) btn.zone.disableInteractive();
+            });
+        }
+
+        const correct = userIndex === questionData.correctIndex;
+        const scene = this.scene;
+
+        // Show feedback
+        const feedbackText = scene.add.text(panelX, panelY - 130, correct ? '✓ 正确!' : '✗ 再想想~', {
+            fontSize: '22px',
+            fontFamily: 'Arial',
+            fontStyle: 'bold',
+            color: correct ? '#4caf50' : '#ff6b6b',
+            stroke: '#ffffff',
+            strokeThickness: 3
+        }).setOrigin(0.5).setScrollFactor(0).setDepth(205);
+
+        // Show correct answer if wrong
+        if (!correct && questionData.correctAnswer) {
+            const correctText = scene.add.text(panelX, panelY - 105, `正确答案：${questionData.correctAnswer}`, {
+                fontSize: '14px',
+                fontFamily: 'Arial',
+                color: '#4caf50'
+            }).setOrigin(0.5).setScrollFactor(0).setDepth(205);
+            elements.push(correctText);
+        }
+
+        // Explanation
+        if (questionData.explain && !correct) {
+            const explainText = scene.add.text(panelX, panelY - 85, questionData.explain, {
+                fontSize: '12px',
+                fontFamily: 'Arial',
+                color: '#666666',
+                wordWrap: { width: 400 },
+                align: 'center'
+            }).setOrigin(0.5).setScrollFactor(0).setDepth(205);
+            elements.push(explainText);
+        }
+
+        elements.push(feedbackText);
+
+        // For sentence type, add follow-along reading button
+        if (correct && questionData.type === 'sentence' && questionData.audioText) {
+            const delay = 600;
+            scene.time.delayedCall(delay, () => {
+                const readBtnY = panelY + 140;
+                const readBtnW = 180;
+                const readBtnH = 36;
+
+                const readBg = scene.add.graphics().setScrollFactor(0).setDepth(205);
+                readBg.fillStyle(0x87ceeb, 0.8);
+                readBg.fillRoundedRect(panelX - readBtnW / 2, readBtnY - readBtnH / 2, readBtnW, readBtnH, 10);
+                readBg.lineStyle(2, 0xffffff);
+                readBg.strokeRoundedRect(panelX - readBtnW / 2, readBtnY - readBtnH / 2, readBtnW, readBtnH, 10);
+
+                const readText = scene.add.text(panelX, readBtnY, '🔊 听发音跟读', {
+                    fontSize: '16px',
+                    fontFamily: 'Arial',
+                    fontStyle: 'bold',
+                    color: '#ffffff'
+                }).setOrigin(0.5).setScrollFactor(0).setDepth(206);
+
+                const readZone = scene.add.zone(panelX, readBtnY, readBtnW, readBtnH)
+                    .setInteractive({ useHandCursor: true }).setScrollFactor(0).setDepth(207);
+
+                elements.push(readBg, readText, readZone);
+
+                let reading = false;
+                readZone.on('pointerdown', () => {
+                    if (reading) return;
+                    reading = true;
+
+                    // First speak the sentence
+                    if (!this.audioMgr) this.audioMgr = new AudioManager();
+                    this.audioMgr.speakSentence(questionData.audioText);
+
+                    readText.setText('🎤 请跟读...');
+                    readBg.clear();
+                    readBg.fillStyle(0xdda0dd, 0.8);
+                    readBg.fillRoundedRect(panelX - readBtnW / 2, readBtnY - readBtnH / 2, readBtnW, readBtnH, 10);
+                    readBg.lineStyle(2, 0xffffff);
+                    readBg.strokeRoundedRect(panelX - readBtnW / 2, readBtnY - readBtnH / 2, readBtnW, readBtnH, 10);
+
+                    // Wait for TTS then start recognition
+                    scene.time.delayedCall(1500, () => {
+                        this.audioMgr.listenAndCompare(questionData.audioText, (result) => {
+                            readText.setText(result.message);
+                            readBg.clear();
+                            const resultColor = result.passed ? 0x90ee90 : 0xffb6b1;
+                            readBg.fillStyle(resultColor, 0.8);
+                            readBg.fillRoundedRect(panelX - readBtnW / 2, readBtnY - readBtnH / 2, readBtnW + 40, Math.min(readBtnH + 10, 50), 10);
+                            readZone.disableInteractive();
+
+                            // Close after delay
+                            scene.time.delayedCall(1500, () => {
+                                this.hide();
+                                if (onAnswer) onAnswer(correct);
+                            });
+                        });
+                    });
+                });
+
+                // Also provide a skip button
+                const skipText = scene.add.text(panelX, readBtnY + 28, '跳过跟读', {
+                    fontSize: '12px',
+                    fontFamily: 'Arial',
+                    color: '#aaa'
+                }).setOrigin(0.5).setScrollFactor(0).setDepth(206)
+                    .setInteractive({ useHandCursor: true });
+
+                skipText.on('pointerdown', () => {
+                    this.hide();
+                    if (onAnswer) onAnswer(correct);
+                });
+                elements.push(skipText);
+            });
+        } else {
+            // Close after delay for non-sentence or wrong answers
+            scene.time.delayedCall(correct ? 800 : 1800, () => {
+                this.hide();
+                if (onAnswer) onAnswer(correct);
+            });
+        }
+    }
+
+    hide() {
+        this.isOpen = false;
+
+        // Destroy all elements
+        if (this.elements) {
+            this.elements.forEach(el => {
+                if (el && el.destroy) el.destroy();
+            });
+            this.elements = [];
+        }
+
+        if (this.overlay) {
+            this.overlay.destroy();
+            this.overlay = null;
+        }
+
+        this.choiceButtons = [];
+
+        // Resume physics
+        this.scene.physics.resume();
+    }
+}
+class ResultScene extends Phaser.Scene {
+    constructor() {
+        super({ key: 'ResultScene' });
+    }
+
+    init(data) {
+        this.worldNum = data.world || 1;
+        this.levelNum = data.level || 1;
+        this.coins = data.coins || 0;
+        this.totalCoins = data.totalCoins || 0;
+        this.correct = data.correct || 0;
+        this.total = data.total || 0;
+        this.lives = data.lives || 0;
+    }
+
+    create() {
+        const { width, height } = this.cameras.main;
+
+        // Background
+        const bg = this.add.graphics();
+        bg.fillGradientStyle(0x1a1a2e, 0x1a1a2e, 0x2d1b4e, 0x2d1b4e, 1);
+        bg.fillRect(0, 0, width, height);
+
+        // Stars based on performance
+        const ratio = this.totalCoins > 0 ? this.coins / Math.max(this.totalCoins, 1) : 0;
+        const starCount = ratio >= 0.8 ? 3 : ratio >= 0.5 ? 2 : 1;
+
+        // Title
+        this.add.text(width / 2, 50, '关卡完成!', {
+            fontSize: '36px',
+            fontFamily: 'Arial',
+            fontStyle: 'bold',
+            color: '#ffd700',
+            stroke: '#333333',
+            strokeThickness: 3
+        }).setOrigin(0.5);
+
+        // Stars
+        for (let i = 0; i < 3; i++) {
+            const starX = width / 2 - 60 + i * 60;
+            const star = this.add.image(starX, 120, 'star').setScale(i < starCount ? 2 : 1);
+            if (i < starCount) {
+                star.setAlpha(0);
+                this.tweens.add({
+                    targets: star,
+                    alpha: 1,
+                    scale: 2,
+                    duration: 400,
+                    delay: i * 300 + 300,
+                    ease: 'Back.easeOut'
+                });
+            } else {
+                star.setAlpha(0.3);
+                star.setTint(0x666666);
+            }
+        }
+
+        // Stats
+        const statsY = 180;
+        this.add.text(width / 2, statsY, `金币: ${this.coins}  |  答题: ${this.correct}/${this.total}`, {
+            fontSize: '20px',
+            fontFamily: 'Arial',
+            color: '#ffffff'
+        }).setOrigin(0.5);
+
+        this.add.text(width / 2, statsY + 30, `正确率: ${this.total > 0 ? Math.round(this.correct / this.total * 100) : 0}%  |  生命: ${'♥'.repeat(this.lives)}`, {
+            fontSize: '16px',
+            fontFamily: 'Arial',
+            color: '#ffb6c1'
+        }).setOrigin(0.5);
+
+        // Next level button
+        const btnY = 280;
+        const btn = this.add.graphics();
+        btn.fillStyle(0x90ee90);
+        btn.fillRoundedRect(width / 2 - 80, btnY - 22, 160, 44, 10);
+
+        const nextLevel = this.levelNum < 4
+            ? `下一关 →`
+            : '返回地图';
+
+        this.add.text(width / 2, btnY, nextLevel, {
+            fontSize: '20px',
+            fontFamily: 'Arial',
+            fontStyle: 'bold',
+            color: '#333333'
+        }).setOrigin(0.5);
+
+        const btnZone = this.add.zone(width / 2, btnY, 160, 44).setInteractive({ useHandCursor: true });
+
+        btnZone.on('pointerover', () => {
+            btn.clear();
+            btn.fillStyle(0xa0f0a0);
+            btn.fillRoundedRect(width / 2 - 80, btnY - 22, 160, 44, 10);
+        });
+
+        btnZone.on('pointerout', () => {
+            btn.clear();
+            btn.fillStyle(0x90ee90);
+            btn.fillRoundedRect(width / 2 - 80, btnY - 22, 160, 44, 10);
+        });
+
+        btnZone.on('pointerdown', () => {
+            // Save progress
+            if (!progressManager) progressManager = new ProgressManager();
+            const ratio = this.totalCoins > 0 ? this.coins / Math.max(this.totalCoins, 1) : 0;
+            const stars = ratio >= 0.8 ? 3 : ratio >= 0.5 ? 2 : 1;
+            // Map level number to progress key (4 = 'boss')
+            const levelKey = this.levelNum >= 4 ? 'boss' : this.levelNum;
+            progressManager.completeLevel(this.worldNum, levelKey, stars);
+
+            // Determine next level
+            const levelTypes = ['vocabulary', 'sentence', 'grammar', 'boss'];
+            const nextLevel = this.levelNum < 4 ? this.levelNum + 1 : null;
+            const nextType = nextLevel ? levelTypes[nextLevel - 1] : null;
+
+            if (nextLevel) {
+                this.scene.start('GameScene', {
+                    world: this.worldNum,
+                    level: nextLevel,
+                    type: nextType
+                });
+            } else {
+                this.scene.start('WorldSelectScene');
+            }
+        });
+
+        // Replay button
+        const replayY = 340;
+        this.add.text(width / 2, replayY, '重新挑战', {
+            fontSize: '16px',
+            fontFamily: 'Arial',
+            color: '#aaa'
+        }).setOrigin(0.5).setInteractive({ useHandCursor: true })
+            .on('pointerover', function () { this.setColor('#fff'); })
+            .on('pointerout', function () { this.setColor('#aaa'); })
+            .on('pointerdown', () => {
+                this.scene.start('GameScene', {
+                    world: this.worldNum,
+                    level: this.levelNum,
+                    type: 'vocabulary'
+                });
+            });
+
+        // Particle celebration
+        for (let i = 0; i < 20; i++) {
+            const px = Phaser.Math.Between(50, width - 50);
+            const py = Phaser.Math.Between(50, height - 50);
+            const sparkle = this.add.image(px, py, 'sparkle').setAlpha(0).setScale(0.5);
+            this.tweens.add({
+                targets: sparkle,
+                alpha: 0.8,
+                scale: 1,
+                duration: 800,
+                delay: i * 100,
+                yoyo: true,
+                onComplete: () => sparkle.destroy()
+            });
+        }
+
+        this.cameras.main.fadeIn(500);
+    }
+}
+// Game configuration and bootstrap
+const GAME_WIDTH = 800;
+const GAME_HEIGHT = 480;
+const TILE_SIZE = 32;
+
+// Color palette - cute & soft for young girls
+const COLORS = {
+    sky: 0x87ceeb,
+    pink: 0xffb6c1,
+    purple: 0xdda0dd,
+    yellow: 0xffd700,
+    green: 0x90ee90,
+    brown: 0x8b4513,
+    white: 0xffffff,
+    red: 0xff6b6b,
+    skin: 0xffdab9,
+    hair: 0x4a3728,
+    dress: 0xff69b4,
+    grass: 0x7ec850,
+    ground: 0xc8845c,
+    coin: 0xffd700,
+    block: 0xffa500,
+    dark: 0x333333,
+};
+
+const config = {
+    type: Phaser.AUTO,
+    width: GAME_WIDTH,
+    height: GAME_HEIGHT,
+    parent: 'game-container',
+    backgroundColor: '#87ceeb',
+    pixelArt: true,
+    roundPixels: true,
+    physics: {
+        default: 'arcade',
+        arcade: {
+            gravity: { y: 900 },
+            debug: false
+        }
+    },
+    scale: {
+        mode: Phaser.Scale.FIT,
+        autoCenter: Phaser.Scale.CENTER_BOTH,
+        width: GAME_WIDTH,
+        height: GAME_HEIGHT
+    },
+    scene: [
+        BootScene,
+        MenuScene,
+        WorldSelectScene,
+        GameScene,
+        ResultScene
+    ]
+};
+
+const game = new Phaser.Game(config);
+window.game = game;
+    </script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Claude internal
+.claude/
+
+# Node
+node_modules/
+package-lock.json
+
+# Python
+__pycache__/
+*.pyc
+
+# Test artifacts
+test_*.js
+test_*.py
+test_*.mjs
+*-screenshot.png
+v*_screenshot.png
+
+# Large reference files
+*.pdf
