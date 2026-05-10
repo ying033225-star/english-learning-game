@@ -1,69 +1,70 @@
-# 英语大冒险 - English Adventure
+# 项目总览
 
-Mario-style 2D platformer English learning game for 4th grade students (新外研版四年级下册). Built with Phaser 3.60, pure static HTML+JS — zero dependencies beyond the Phaser CDN script.
+教育游戏和互动学习工具开发项目，包含：
 
-## Quick start
+- **儿童英语闯关游戏**（卡通风格）— Phaser 3 横版平台，新外研版四下教材
+- **雅思备考训练工具**（简洁高效）— 待开发
+- **Markdown 写作互动教学** — 待开发
 
-- **Play**: Open `index.html` in a browser (double-click)
-- **Build bundle**: `python3 build_bundle.py` → regenerates `game-bundle.html`
-- **Test**: `npx playwright` available for browser automation; test scripts are ephemeral (gitignored via `test_*.js`)
+# 安全规则
 
-## Architecture
+- 禁止 `pkill`、`killall`、`kill -9` 杀系统进程
+- 禁止操作系统 Google Chrome，只用 Playwright 内置 Chromium
+- 遇到端口冲突换端口，不要杀进程
 
-Phaser 3 Arcade physics game. All source in `js/`. The bundle inlines every JS file into a single `<script>` tag inside `game-bundle.html` so it's fully portable.
+# 开发规则
+
+- 一次只做一件事，完成了再做下一件
+- 完成后列举具体例子让我验收
+- 同一个 bug 修复超过 3 次必须停下来，换思路先诊断根因
+- 每次修改后自动 `git commit`，用中文写明改动内容
+
+# 内容规则
+
+- 题目内容必须来自原始文件（教材 PDF、课文文本），禁止自己编造
+- 新内容先更新数据文件（`units.js` / JSON），再更新游戏逻辑
+
+# 风格规则
+
+- 儿童游戏：卡通可爱，色彩鲜艳，像素风
+- 雅思工具：简洁专业，信息密度高
+- MD 教学：互动性强，步骤清晰
+
+# 子项目
+
+## 英语大冒险 (`/Users/ly/cc-test`)
+
+Mario 风格 2D 平台英语学习游戏。Phaser 3.60，纯静态 HTML+JS。
+
+- **入口**：`index.html`（开发）/ `game-bundle.html`（单文件分发）
+- **构建**：`python3 build_bundle.py`
+- **测试**：Playwright 内置 Chromium，测试脚本 `test_*.js` 已 gitignore
+- **仓库**：https://github.com/ying033225-star/english-learning-game
+
+### 架构
 
 ```
 js/
-  boot.js                   — Phaser.Game config, scene registry
-  data/units.js             — All 6 units' vocabulary/sentences/grammar/phonics
-  data/levels.js            — 24 level layouts (4 per unit × 6 units)
-  scenes/
-    BootScene.js            — Procedural texture generation (no external images)
-    MenuScene.js            — Title screen
-    WorldSelectScene.js     — World map with locked/unlocked levels
-    GameScene.js            — Core platformer gameplay, question triggering, enemy patrol
-    QuestionUI.js           — Modal question UI (all 7 question types)
-    ResultScene.js          — Level complete / score screen
-  entities/
-    Player.js               — Girl character: run, jump, hit blocks
-    QuestionBlock.js        — "?" block that triggers questions on hit
-    Coin.js                 — Correct answer reward
-    Enemy.js                — 4 enemy types: ground, flying, shooter, speedy
-    Boss.js                 — Boss enemy with physics-body workaround
-  systems/
-    QuizManager.js          — Question generation (7 types), wrong-answer tracking
-    AudioManager.js         — Web Speech TTS + speech recognition for follow-along reading
-    ProgressManager.js      — localStorage-based progress persistence
+  boot.js              — Phaser.Game 配置
+  data/units.js        — 6 单元词汇/句型/语法/语音
+  data/levels.js       — 24 关布局
+  scenes/              — 6 个场景（Boot/Menu/WorldSelect/Game/QuestionUI/Result）
+  entities/            — Player, QuestionBlock, Coin, Enemy(4种), Boss
+  systems/             — QuizManager(7种题型), AudioManager(TTS+跟读), ProgressManager
 ```
 
-## Level types & question rotation
+### 7 种题型轮换
 
-| Level type | Questions rotate through |
+| 关卡类型 | 轮换顺序 |
 |---|---|
-| `vocabulary` (单词收集) | vocab → listening → spelling → cloze → phonics (5轮) |
-| `sentence` (句型跳跃) | sentence → cloze → vocab (3轮) |
-| `grammar` (语法选择) | grammar → cloze → vocab (3轮) |
-| `boss` (综合测验) | primarily vocab, 30% review from wrong answers |
+| 单词收集 | vocab → listening → spelling → cloze → phonics |
+| 句型跳跃 | sentence → cloze → vocab |
+| 语法选择 | grammar → cloze → vocab |
+| Boss 综合 | vocab + 30% 错题回顾 |
 
-The 7 question types: `vocabulary`, `listening`, `sentence`, `grammar`, `phonics`, `spelling`, `cloze`.
+### 关键坑位
 
-## Key implementation notes
-
-- **Enemy movement**: Patrol logic is in `GameScene.update()`, not in the Enemy class. Uses `this.enemies.create(x, y, 'enemy')` (not `add()`) so velocity isn't zeroed by `body.reset()`.
-- **Boss physics**: Phaser Container physics has a known bug with colliders. Boss uses a hidden `_bodySprite` zone as the collision target; the visual Container syncs via tween `onUpdate`.
-- **Textures**: All sprites are procedurally generated in `BootScene.js` using Phaser Graphics — no external image files.
-- **Version bump ritual**: Update version badge in `index.html`, bump all `?v=` cache busters, and update `VERSION` in `build_bundle.py`, then rebuild.
-
-## Content sources
-
-Game content is derived from 4 reference PDFs (gitignored):
-1. 新外研四下单词表带音标.pdf — vocabulary with phonetics
-2. 新外研四下-单元重点知识总结.pdf — grammar, phrases, phonics patterns
-3. 新外研四下英语课堂笔记.pdf — image-only, no extractable text
-4. 新外研英语四下课文逐句翻译.pdf — textbook sentences with translations
-
-Extracted `.txt` files are in the repo root. The enriched `units.js` contains 25–33 vocab per unit, 14–17 phrases, 15–17 sentences, 8 grammar quiz options, and 6–10 phonics words.
-
-## Repo
-
-https://github.com/ying033225-star/english-learning-game
+- Enemy 移动在 `GameScene.update()` 直接巡线，不依赖 Enemy 类自身逻辑
+- Boss 碰撞用隐藏 `_bodySprite` zone 绕过 Phaser Container 碰撞 bug
+- 所有纹理在 `BootScene.js` 用 Graphics 代码生成，无外部图片
+- 版本号升级需同步：`index.html` badge、所有 `?v=` cache buster、`build_bundle.py` 内 `VERSION`
