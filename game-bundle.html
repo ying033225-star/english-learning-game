@@ -13,9 +13,10 @@
 </head>
 <body>
     <div id="game-container"></div>
-    <div id="version-badge" style="position:fixed;top:0;left:0;background:#0f0;color:#000;padding:2px 8px;font:12px Arial;z-index:9999;">v16</div>
+    <div id="version-badge" style="position:fixed;top:0;left:0;background:#0f0;color:#000;padding:2px 8px;font:12px Arial;z-index:9999;">v17</div>
     <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
     <script>
+// --- js/systems/AudioManager.js ---
 class AudioManager {
     constructor() {
         // TTS
@@ -286,6 +287,93 @@ class AudioManager {
 }
 
 let audioManager;
+
+
+// --- js/systems/ProgressManager.js ---
+// ProgressManager - localStorage progress tracking
+class ProgressManager {
+    constructor() {
+        this.progress = this.loadProgress();
+    }
+
+    getDefaultProgress() {
+        return {
+            currentWorld: 1,
+            currentLevel: 1,
+            worlds: {
+                1: { unlocked: true, levels: { 1: { stars: 0, completed: false }, 2: { stars: 0, completed: false }, 3: { stars: 0, completed: false }, boss: { stars: 0, completed: false } } },
+                2: { unlocked: false, levels: { 1: { stars: 0, completed: false }, 2: { stars: 0, completed: false }, 3: { stars: 0, completed: false }, boss: { stars: 0, completed: false } } },
+                3: { unlocked: false, levels: { 1: { stars: 0, completed: false }, 2: { stars: 0, completed: false }, 3: { stars: 0, completed: false }, boss: { stars: 0, completed: false } } },
+                4: { unlocked: false, levels: { 1: { stars: 0, completed: false }, 2: { stars: 0, completed: false }, 3: { stars: 0, completed: false }, boss: { stars: 0, completed: false } } },
+                5: { unlocked: false, levels: { 1: { stars: 0, completed: false }, 2: { stars: 0, completed: false }, 3: { stars: 0, completed: false }, boss: { stars: 0, completed: false } } },
+                6: { unlocked: false, levels: { 1: { stars: 0, completed: false }, 2: { stars: 0, completed: false }, 3: { stars: 0, completed: false }, boss: { stars: 0, completed: false } } }
+            }
+        };
+    }
+
+    loadProgress() {
+        try {
+            const saved = JSON.parse(localStorage.getItem('gameProgress'));
+            return saved || this.getDefaultProgress();
+        } catch {
+            return this.getDefaultProgress();
+        }
+    }
+
+    saveProgress() {
+        try {
+            localStorage.setItem('gameProgress', JSON.stringify(this.progress));
+        } catch { /* storage full */ }
+    }
+
+    completeLevel(world, level, stars) {
+        if (!this.progress.worlds[world]) return;
+        this.progress.worlds[world].levels[level].completed = true;
+        this.progress.worlds[world].levels[level].stars = Math.max(
+            this.progress.worlds[world].levels[level].stars,
+            stars
+        );
+
+        // Unlock next level or world
+        if (level === 'boss') {
+            // Unlock next world
+            const nextWorld = world + 1;
+            if (this.progress.worlds[nextWorld]) {
+                this.progress.worlds[nextWorld].unlocked = true;
+            }
+        } else {
+            // Unlock next level
+            const nextLevel = level + 1;
+            if (this.progress.worlds[world].levels[nextLevel]) {
+                this.progress.worlds[world].levels[nextLevel].unlocked = true;
+            }
+        }
+
+        this.progress.currentWorld = world;
+        this.progress.currentLevel = level;
+        this.saveProgress();
+    }
+
+    getLevelStars(world, level) {
+        return this.progress.worlds[world]?.levels[level]?.stars || 0;
+    }
+
+    isLevelUnlocked(world, level) {
+        return this.progress.worlds[world]?.unlocked
+            && this.progress.worlds[world]?.levels[level]?.unlocked !== false;
+    }
+
+    resetProgress() {
+        this.progress = this.getDefaultProgress();
+        this.saveProgress();
+    }
+}
+
+// Global instance
+let progressManager;
+
+
+// --- js/systems/QuizManager.js ---
 class QuizManager {
     constructor(unitData) {
         this.unitData = unitData;
@@ -314,6 +402,12 @@ class QuizManager {
                 break;
             case 'phonics':
                 question = this.generatePhonicsQuestion();
+                break;
+            case 'spelling':
+                question = this.generateSpellingQuestion();
+                break;
+            case 'cloze':
+                question = this.generateClozeQuestion();
                 break;
             default:
                 question = this.generateVocabQuestion();
@@ -480,6 +574,150 @@ class QuizManager {
         };
     }
 
+    generateSpellingQuestion() {
+        const vocab = [...this.unitData.vocabulary].filter(v => v.en.length >= 3);
+        if (vocab.length === 0) return this.generateVocabQuestion();
+
+        const correct = vocab[Phaser.Math.Between(0, vocab.length - 1)];
+        const word = correct.en;
+        const letters = word.split('');
+
+        // Hide 30-50% of letters (at least 1, at most all but 2)
+        const numToHide = Math.max(1, Math.min(Math.floor(word.length * 0.5), Math.floor(word.length * 0.3)));
+        const numHide = Phaser.Math.Between(Math.max(1, Math.floor(word.length * 0.3)), Math.max(1, Math.floor(word.length * 0.5)));
+
+        // Pick random positions to hide (prefer consonants, avoid first letter being hidden)
+        const hideable = letters.map((l, i) => ({ letter: l, index: i }))
+            .filter(item => item.index > 0); // keep first letter visible as hint
+        const shuffled = hideable.sort(() => Math.random() - 0.5);
+        const toHide = shuffled.slice(0, Math.min(numHide, hideable.length));
+        const hideIndices = new Set(toHide.map(h => h.index));
+
+        // Build letter blanks
+        const blanks = letters.map((l, i) => ({
+            letter: l,
+            hidden: hideIndices.has(i),
+            filled: hideIndices.has(i) ? '' : l
+        }));
+
+        // Collect hidden letters as the correct answer
+        const hiddenLetters = toHide.map(h => h.letter);
+
+        // Generate distractor letters from other vocab words
+        const otherWords = [...this.unitData.vocabulary]
+            .filter(v => v.en !== word)
+            .sort(() => Math.random() - 0.5);
+        const distractors = [];
+        for (const ow of otherWords) {
+            for (const ch of ow.en.toLowerCase()) {
+                if (!hiddenLetters.includes(ch) && !distractors.includes(ch) && /[a-z]/.test(ch)) {
+                    distractors.push(ch);
+                    if (distractors.length >= hiddenLetters.length + 3) break;
+                }
+            }
+            if (distractors.length >= hiddenLetters.length + 3) break;
+        }
+
+        // All letter choices = hidden letters + extra distractors (ensure all hidden letters are included)
+        const allChoices = [...new Set([...hiddenLetters, ...distractors])];
+        // Ensure at least 6 choices and ALL hidden letters are present
+        let finalChoices = [...hiddenLetters];
+        const extraChoices = allChoices.filter(c => !hiddenLetters.includes(c))
+            .sort(() => Math.random() - 0.5);
+        finalChoices.push(...extraChoices.slice(0, Math.max(0, 6 - hiddenLetters.length)));
+        finalChoices = [...new Set(finalChoices)].sort(() => Math.random() - 0.5);
+
+        // Build display text: "d _ c t _ r"
+        const displayWord = blanks.map(b => b.hidden ? '_' : b.letter).join(' ');
+        const correctBlanks = blanks.map(b => b.hidden ? b.letter : '').join('');
+
+        return {
+            type: 'spelling',
+            question: `补全单词：${displayWord}`,
+            questionSub: `${correct.cn}  /${correct.phonetic}/`,
+            hint: '听发音，选择正确的字母补全单词',
+            choices: finalChoices,
+            correctIndex: -1, // special: multiple blanks, answer is the completed word
+            correctAnswer: word,
+            correctBlanks: hiddenLetters,
+            blanks: blanks,
+            displayWord: displayWord,
+            audioText: word,
+            explain: `${word} = ${correct.cn}`,
+            isReview: false
+        };
+    }
+
+    generateClozeQuestion() {
+        const sentences = this.unitData.sentences;
+        if (!sentences || sentences.length === 0) return this.generateVocabQuestion();
+        const vocab = this.unitData.vocabulary;
+
+        // Pick a sentence and find a content word that exists in unit vocab
+        const sentence = sentences[Phaser.Math.Between(0, sentences.length - 1)];
+        const words = sentence.en.split(/\s+/);
+        const vocabWords = new Set(vocab.map(v => v.en.toLowerCase()));
+        const contentWords = [];
+
+        words.forEach((w, i) => {
+            const clean = w.replace(/[.,!?;:'"]/g, '').toLowerCase();
+            if (vocabWords.has(clean) && clean.length > 1) {
+                contentWords.push({ word: w, clean: clean, index: i });
+            }
+        });
+
+        if (contentWords.length === 0) {
+            // Fallback: pick any non-trivial word not in stop-words
+            const stopWords = ['a', 'an', 'the', 'is', 'are', 'am', 'was', 'were',
+                'in', 'on', 'at', 'to', 'for', 'of', 'with', 'and', 'or', 'but',
+                'it', 'this', 'that', 'he', 'she', 'they', 'we', 'you', 'I', 'my',
+                'do', 'does', 'did', 'can', 'will', 'not', 'no', 'yes', 'has', 'have'];
+            words.forEach((w, i) => {
+                const clean = w.replace(/[.,!?;:'"]/g, '').toLowerCase();
+                if (!stopWords.includes(clean) && clean.length > 1) {
+                    contentWords.push({ word: w, clean: clean, index: i });
+                }
+            });
+        }
+
+        if (contentWords.length === 0) return this.generateVocabQuestion();
+
+        const picked = contentWords[Phaser.Math.Between(0, contentWords.length - 1)];
+        const blankWord = picked.clean;
+        const cleanWord = picked.word.replace(/[.,!?;:'"]/g, '');
+
+        // Find matching vocab entry
+        const correctVocab = vocab.find(v => v.en.toLowerCase() === blankWord);
+
+        // Build sentence with blank
+        const sentenceWithBlank = words.map((w, i) =>
+            i === picked.index ? '________' : w
+        ).join(' ');
+
+        // Generate wrong options from unit vocabulary
+        const wrongs = vocab
+            .filter(v => v.en.toLowerCase() !== blankWord)
+            .sort(() => Math.random() - 0.5)
+            .slice(0, 3);
+
+        const choices = [correctVocab || { en: cleanWord, cn: '' }, ...wrongs]
+            .sort(() => Math.random() - 0.5);
+        const correctIndex = choices.findIndex(c => c.en.toLowerCase() === blankWord);
+
+        return {
+            type: 'cloze',
+            question: sentenceWithBlank,
+            questionSub: `句子意思：${sentence.cn}`,
+            hint: '选择正确的单词填入空白处',
+            choices: choices.map(c => c.en),
+            correctIndex: correctIndex,
+            correctAnswer: cleanWord,
+            audioText: sentence.en,
+            explain: `完整句子：${sentence.en}\n${sentence.cn}`,
+            isReview: false
+        };
+    }
+
     fallbackQuestion() {
         return {
             type: 'vocabulary',
@@ -556,545 +794,9 @@ class QuizManager {
         this.saveWrongAnswers();
     }
 }
-// ProgressManager - localStorage progress tracking
-class ProgressManager {
-    constructor() {
-        this.progress = this.loadProgress();
-    }
 
-    getDefaultProgress() {
-        return {
-            currentWorld: 1,
-            currentLevel: 1,
-            worlds: {
-                1: { unlocked: true, levels: { 1: { stars: 0, completed: false }, 2: { stars: 0, completed: false }, 3: { stars: 0, completed: false }, boss: { stars: 0, completed: false } } },
-                2: { unlocked: false, levels: { 1: { stars: 0, completed: false }, 2: { stars: 0, completed: false }, 3: { stars: 0, completed: false }, boss: { stars: 0, completed: false } } },
-                3: { unlocked: false, levels: { 1: { stars: 0, completed: false }, 2: { stars: 0, completed: false }, 3: { stars: 0, completed: false }, boss: { stars: 0, completed: false } } },
-                4: { unlocked: false, levels: { 1: { stars: 0, completed: false }, 2: { stars: 0, completed: false }, 3: { stars: 0, completed: false }, boss: { stars: 0, completed: false } } },
-                5: { unlocked: false, levels: { 1: { stars: 0, completed: false }, 2: { stars: 0, completed: false }, 3: { stars: 0, completed: false }, boss: { stars: 0, completed: false } } },
-                6: { unlocked: false, levels: { 1: { stars: 0, completed: false }, 2: { stars: 0, completed: false }, 3: { stars: 0, completed: false }, boss: { stars: 0, completed: false } } }
-            }
-        };
-    }
 
-    loadProgress() {
-        try {
-            const saved = JSON.parse(localStorage.getItem('gameProgress'));
-            return saved || this.getDefaultProgress();
-        } catch {
-            return this.getDefaultProgress();
-        }
-    }
-
-    saveProgress() {
-        try {
-            localStorage.setItem('gameProgress', JSON.stringify(this.progress));
-        } catch { /* storage full */ }
-    }
-
-    completeLevel(world, level, stars) {
-        if (!this.progress.worlds[world]) return;
-        this.progress.worlds[world].levels[level].completed = true;
-        this.progress.worlds[world].levels[level].stars = Math.max(
-            this.progress.worlds[world].levels[level].stars,
-            stars
-        );
-
-        // Unlock next level or world
-        if (level === 'boss') {
-            // Unlock next world
-            const nextWorld = world + 1;
-            if (this.progress.worlds[nextWorld]) {
-                this.progress.worlds[nextWorld].unlocked = true;
-            }
-        } else {
-            // Unlock next level
-            const nextLevel = level + 1;
-            if (this.progress.worlds[world].levels[nextLevel]) {
-                this.progress.worlds[world].levels[nextLevel].unlocked = true;
-            }
-        }
-
-        this.progress.currentWorld = world;
-        this.progress.currentLevel = level;
-        this.saveProgress();
-    }
-
-    getLevelStars(world, level) {
-        return this.progress.worlds[world]?.levels[level]?.stars || 0;
-    }
-
-    isLevelUnlocked(world, level) {
-        return this.progress.worlds[world]?.unlocked
-            && this.progress.worlds[world]?.levels[level]?.unlocked !== false;
-    }
-
-    resetProgress() {
-        this.progress = this.getDefaultProgress();
-        this.saveProgress();
-    }
-}
-
-// Global instance
-let progressManager;
-// All 6 units learning content - 新外研版四年级下册
-const UNITS = {
-    1: {
-        id: 1, title: "People at Work", titleCn: "职业", bgColor: 0x87ceeb,
-        vocabulary: [
-            { en: "doctor", cn: "医生", phonetic: "/ˈdɒktə(r)/" },
-            { en: "fireman", cn: "消防队员", phonetic: "/ˈfaɪəmən/" },
-            { en: "farmer", cn: "农民", phonetic: "/ˈfɑːmə(r)/" },
-            { en: "cook", cn: "厨师", phonetic: "/kʊk/" },
-            { en: "police officer", cn: "警察", phonetic: "/pəˈliːs ˈɒfɪsə(r)/" },
-            { en: "nurse", cn: "护士", phonetic: "/nɜːs/" },
-            { en: "driver", cn: "司机", phonetic: "/ˈdraɪvə(r)/" },
-            { en: "scientist", cn: "科学家", phonetic: "/ˈsaɪəntɪst/" },
-            { en: "painter", cn: "画家", phonetic: "/ˈpeɪntə(r)/" },
-            { en: "writer", cn: "作家", phonetic: "/ˈraɪtə(r)/" },
-            { en: "worker", cn: "工人", phonetic: "/ˈwɜːkə(r)/" },
-            { en: "postman", cn: "邮递员", phonetic: "/ˈpəʊstmən/" },
-            { en: "taxi", cn: "出租车", phonetic: "/ˈtæksi/" },
-            { en: "station", cn: "站，所", phonetic: "/ˈsteɪʃn/" },
-            { en: "field", cn: "田地", phonetic: "/fiːld/" },
-            { en: "night", cn: "夜晚", phonetic: "/naɪt/" },
-        ],
-        phrases: [
-            { en: "help sick people", cn: "帮助病人" },
-            { en: "go to work", cn: "去上班" },
-            { en: "work in a hospital", cn: "在医院工作" },
-            { en: "work on a farm", cn: "在农场工作" },
-            { en: "drive a car", cn: "开车" },
-            { en: "grow vegetables", cn: "种蔬菜" },
-        ],
-        sentences: [
-            { en: "What's your father's job?", cn: "你爸爸的工作是什么？" },
-            { en: "What does your mother do?", cn: "你妈妈是做什么的？" },
-            { en: "He's a scientist!", cn: "他是一名科学家！" },
-            { en: "She's a nurse. She helps sick people.", cn: "她是一名护士，她帮助病人。" },
-            { en: "He works in a hospital.", cn: "他在医院工作。" },
-            { en: "I want to be a police officer.", cn: "我想成为警察。" },
-        ],
-        grammar: {
-            title: "三单 & 职业问答",
-            rules: ["What's...job? = What does...do?", "主语he/she/it + 动词加-s/-es"],
-            quizOptions: {
-                "He ___ in a hospital.": ["works", "work", "working"],
-                "She is ___ nurse.": ["a", "an", "the"],
-                "___ does your father do?": ["What", "Who", "Where"],
-                "My mother ___ English at school.": ["teaches", "teach", "teaching"],
-                "Is your uncle ___ driver?": ["a", "an", "the"],
-            }
-        },
-        phonics: { pattern: "or→/ɔː/, er→/ə(r)/", words: [{ en: "work", phonetic: "/wɜːk/" }, { en: "doctor", phonetic: "/ˈdɒktə(r)/" }, { en: "teacher", phonetic: "/ˈtiːtʃə(r)/" }, { en: "farmer", phonetic: "/ˈfɑːmə(r)/" }] }
-    },
-
-    2: {
-        id: 2, title: "How do you feel today?", titleCn: "情绪", bgColor: 0xffdab9,
-        vocabulary: [
-            { en: "happy", cn: "开心的", phonetic: "/ˈhæpi/" },
-            { en: "sad", cn: "伤心的", phonetic: "/sæd/" },
-            { en: "angry", cn: "生气的", phonetic: "/ˈæŋɡri/" },
-            { en: "scared", cn: "害怕的", phonetic: "/skeəd/" },
-            { en: "excited", cn: "兴奋的", phonetic: "/ɪkˈsaɪtɪd/" },
-            { en: "worried", cn: "担心的", phonetic: "/ˈwʌrid/" },
-            { en: "laugh", cn: "笑", phonetic: "/lɑːf/" },
-            { en: "cough", cn: "咳嗽", phonetic: "/kɒf/" },
-            { en: "better", cn: "好转的", phonetic: "/ˈbetə(r)/" },
-            { en: "gift", cn: "礼物", phonetic: "/ɡɪft/" },
-            { en: "model", cn: "模型", phonetic: "/ˈmɒdl/" },
-            { en: "shout", cn: "喊叫", phonetic: "/ʃaʊt/" },
-            { en: "should", cn: "应该", phonetic: "/ʃʊd/" },
-            { en: "feeling", cn: "感觉", phonetic: "/ˈfiːlɪŋ/" },
-            { en: "huge", cn: "巨大的", phonetic: "/hjuːdʒ/" },
-            { en: "street", cn: "街道", phonetic: "/striːt/" },
-        ],
-        phrases: [
-            { en: "feel happy", cn: "感到开心" },
-            { en: "feel sad", cn: "感到伤心" },
-            { en: "take part in", cn: "参加" },
-            { en: "get well soon", cn: "早日康复" },
-            { en: "a birthday gift", cn: "生日礼物" },
-            { en: "shout at sb.", cn: "对某人大喊" },
-        ],
-        sentences: [
-            { en: "How do you feel today?", cn: "你今天感觉怎么样？" },
-            { en: "I feel happy.", cn: "我感到开心。" },
-            { en: "Why are you sad?", cn: "你为什么伤心？" },
-            { en: "Is she coughing?", cn: "她在咳嗽吗？" },
-            { en: "I am feeling better now.", cn: "我现在感觉好多了。" },
-            { en: "We should say sorry.", cn: "我们应该道歉。" },
-        ],
-        grammar: {
-            title: "情感表达 & 现在进行时",
-            rules: ["主语+be/feel+形容词(表达感受)", "主语+be+动词-ing(进行时)", "should+动词原形(建议)"],
-            quizOptions: {
-                "I ___ happy today.": ["feel", "feels", "feeling"],
-                "She ___ coughing now.": ["is", "are", "am"],
-                "You ___ say sorry.": ["should", "shoulds", "shoulding"],
-                "Why ___ you sad?": ["are", "is", "am"],
-                "He is ___ at Ray.": ["shouting", "shout", "shouts"],
-            }
-        },
-        phonics: { pattern: "ee→/iː/, ea→/e/, y→/i/, ou→/aʊ/", words: [{ en: "feel", phonetic: "/fiːl/" }, { en: "head", phonetic: "/hed/" }, { en: "angry", phonetic: "/ˈæŋɡri/" }, { en: "shout", phonetic: "/ʃaʊt/" }] }
-    },
-
-    3: {
-        id: 3, title: "Everyone's got talent!", titleCn: "才能", bgColor: 0xdda0dd,
-        vocabulary: [
-            { en: "talent", cn: "才能", phonetic: "/ˈtælənt/" },
-            { en: "act", cn: "表演", phonetic: "/ækt/" },
-            { en: "magic", cn: "魔术", phonetic: "/ˈmædʒɪk/" },
-            { en: "shine", cn: "出众", phonetic: "/ʃaɪn/" },
-            { en: "puzzle", cn: "拼图", phonetic: "/ˈpʌzl/" },
-            { en: "dancer", cn: "舞者", phonetic: "/ˈdɑːnsə(r)/" },
-            { en: "win", cn: "获胜", phonetic: "/wɪn/" },
-            { en: "piano", cn: "钢琴", phonetic: "/piˈænəʊ/" },
-            { en: "photo", cn: "照片", phonetic: "/ˈfəʊtəʊ/" },
-            { en: "slowly", cn: "慢慢地", phonetic: "/ˈsləʊli/" },
-            { en: "boy", cn: "男孩", phonetic: "/bɔɪ/" },
-            { en: "fly", cn: "飞", phonetic: "/flaɪ/" },
-            { en: "swim", cn: "游泳", phonetic: "/swɪm/" },
-            { en: "sing", cn: "唱歌", phonetic: "/sɪŋ/" },
-            { en: "write", cn: "写", phonetic: "/raɪt/" },
-            { en: "hard", cn: "努力地", phonetic: "/hɑːd/" },
-        ],
-        phrases: [
-            { en: "be good at", cn: "擅长" },
-            { en: "play the piano", cn: "弹钢琴" },
-            { en: "take photos", cn: "拍照" },
-            { en: "do magic", cn: "变魔术" },
-            { en: "hard work", cn: "努力工作" },
-            { en: "dance well", cn: "跳舞好" },
-        ],
-        sentences: [
-            { en: "Everyone's got talent!", cn: "每个人都有才能！" },
-            { en: "What are you doing?", cn: "你在做什么？" },
-            { en: "I'm looking at their clothes.", cn: "我在看他们的衣服。" },
-            { en: "Don't worry about your clothes.", cn: "别担心你的衣服。" },
-            { en: "He is good at singing.", cn: "他擅长唱歌。" },
-            { en: "Talent is not enough. Hard work makes me shine.", cn: "才能不够，努力让我发光。" },
-        ],
-        grammar: {
-            title: "be good at & Don't祈使句",
-            rules: ["be good at + 名词/动词-ing(擅长)", "Don't + 动词原形(否定祈使句)", "What + be + 主语 + doing?(问正在做什么)"],
-            quizOptions: {
-                "She is good ___ dancing.": ["at", "in", "on"],
-                "___ worry about your clothes.": ["Don't", "Not", "No"],
-                "What ___ you doing?": ["are", "is", "am"],
-                "He is good at ___ the piano.": ["playing", "play", "plays"],
-                "Just go and ___!": ["dance", "dancing", "dances"],
-            }
-        },
-        phonics: { pattern: "ee→/iː/, ea→/e/或/iː/, br/cr→/br//kr/", words: [{ en: "see", phonetic: "/siː/" }, { en: "head", phonetic: "/hed/" }, { en: "teach", phonetic: "/tiːtʃ/" },] }
-    },
-
-    4: {
-        id: 4, title: "Plant life", titleCn: "植物", bgColor: 0x90ee90,
-        vocabulary: [
-            { en: "seed", cn: "种子", phonetic: "/siːd/" },
-            { en: "earth", cn: "泥土", phonetic: "/ɜːθ/" },
-            { en: "root", cn: "根", phonetic: "/ruːt/" },
-            { en: "stem", cn: "茎", phonetic: "/stem/" },
-            { en: "leaf", cn: "叶子", phonetic: "/liːf/" },
-            { en: "flower", cn: "花", phonetic: "/ˈflaʊə(r)/" },
-            { en: "dig", cn: "挖", phonetic: "/dɪɡ/" },
-            { en: "sunflower", cn: "向日葵", phonetic: "/ˈsʌnflaʊə(r)/" },
-            { en: "plant", cn: "种植", phonetic: "/plɑːnt/" },
-            { en: "dream", cn: "梦想", phonetic: "/driːm/" },
-            { en: "sleep", cn: "睡觉", phonetic: "/sliːp/" },
-            { en: "will", cn: "将要", phonetic: "/wɪl/" },
-            { en: "true", cn: "真的", phonetic: "/truː/" },
-            { en: "paper", cn: "纸", phonetic: "/ˈpeɪpə(r)/" },
-            { en: "grow", cn: "成长", phonetic: "/ɡrəʊ/" },
-        ],
-        phrases: [
-            { en: "plant seeds", cn: "播种" },
-            { en: "dig the earth", cn: "挖土" },
-            { en: "water the plants", cn: "浇水" },
-            { en: "grow up", cn: "长大" },
-            { en: "come true", cn: "实现" },
-            { en: "make paper", cn: "造纸" },
-        ],
-        sentences: [
-            { en: "What are you doing?", cn: "你们在做什么？" },
-            { en: "We're digging the earth.", cn: "我们在挖土。" },
-            { en: "Are your seeds growing?", cn: "你们的种子在发芽吗？" },
-            { en: "Yes, they are. Look!", cn: "是的，你看！" },
-            { en: "Grandpa's dreams will come true.", cn: "爷爷的梦想会实现的。" },
-            { en: "We use plants to make paper.", cn: "我们用植物造纸。" },
-        ],
-        grammar: {
-            title: "现在进行时 & will将来时",
-            rules: ["主语+will+动词原形(将来时)", "主语+be+动词-ing(进行时)", "use...to do...(用...做...)"],
-            quizOptions: {
-                "We ___ digging the earth.": ["are", "is", "am"],
-                "The seed ___ grow into a flower.": ["will", "wills", "willing"],
-                "We use cotton ___ make clothes.": ["to", "for", "in"],
-                "___ your seeds growing?": ["Are", "Is", "Do"],
-                "Why ___ the flower dying?": ["is", "are", "do"],
-            }
-        },
-        phonics: { pattern: "ee→/iː/, ea→/e/, ow→/aʊ/, oo→/uː/", words: [{ en: "seed", phonetic: "/siːd/" }, { en: "earth", phonetic: "/ɜːθ/" }, { en: "root", phonetic: "/ruːt/" },] }
-    },
-
-    5: {
-        id: 5, title: "School events", titleCn: "校园活动", bgColor: 0xfffacd,
-        vocabulary: [
-            { en: "drama", cn: "戏剧", phonetic: "/ˈdrɑːmə/" },
-            { en: "trip", cn: "旅行", phonetic: "/trɪp/" },
-            { en: "fair", cn: "集市", phonetic: "/feə(r)/" },
-            { en: "festival", cn: "节日", phonetic: "/ˈfestɪvl/" },
-            { en: "horn", cn: "角", phonetic: "/hɔːn/" },
-            { en: "dot", cn: "点", phonetic: "/dɒt/" },
-            { en: "raindrop", cn: "雨滴", phonetic: "/ˈreɪndrɒp/" },
-            { en: "more", cn: "更多的", phonetic: "/mɔː(r)/" },
-            { en: "special", cn: "特别的", phonetic: "/ˈspeʃl/" },
-            { en: "keeper", cn: "保管人", phonetic: "/ˈkiːpə(r)/" },
-            { en: "lovely", cn: "可爱的", phonetic: "/ˈlʌvli/" },
-            { en: "student", cn: "学生", phonetic: "/ˈstjuːdnt/" },
-            { en: "culture", cn: "文化", phonetic: "/ˈkʌltʃə(r)/" },
-            { en: "hour", cn: "小时", phonetic: "/ˈaʊə(r)/" },
-            { en: "note", cn: "笔记", phonetic: "/nəʊt/" },
-            { en: "forest", cn: "森林", phonetic: "/ˈfɒrɪst/" },
-        ],
-        phrases: [
-            { en: "Science Day", cn: "科学日" },
-            { en: "Book Week", cn: "读书周" },
-            { en: "Field Trip", cn: "实地考察" },
-            { en: "Art Festival", cn: "艺术节" },
-            { en: "Sports Day", cn: "运动会" },
-            { en: "take notes", cn: "做笔记" },
-            { en: "go back home", cn: "回家" },
-            { en: "nature hunt", cn: "自然探索" },
-        ],
-        sentences: [
-            { en: "What school events do you have?", cn: "你们有什么校园活动？" },
-            { en: "We have Science Day and Book Week.", cn: "我们有科学日和读书周。" },
-            { en: "Are there any interesting activities?", cn: "有什么有趣的活动吗？" },
-            { en: "There are so many things to see!", cn: "有好多东西可以看！" },
-            { en: "Look! There's a baby bird.", cn: "看！有一只小鸟。" },
-            { en: "We should help the baby bird.", cn: "我们应该帮助小鸟。" },
-        ],
-        grammar: {
-            title: "There be 句型",
-            rules: ["There is + 单数/不可数名词", "There are + 复数名词", "Is/Are there...? 疑问句"],
-            quizOptions: {
-                "There ___ a baby bird in the tree.": ["is", "are", "am"],
-                "There ___ many stands in the fair.": ["are", "is", "am"],
-                "___ there any games?": ["Are", "Is", "Do"],
-                "There isn't ___ book on the desk.": ["a", "any", "some"],
-                "We ___ help the baby bird.": ["should", "shoulds", "shoulding"],
-            }
-        },
-        phonics: { pattern: "or→/ɔː/, ou→/aʊ/, ow→/aʊ/", words: [{ en: "horn", phonetic: "/hɔːn/" }, { en: "hour", phonetic: "/ˈaʊə(r)/" },] }
-    },
-
-    6: {
-        id: 6, title: "Cool clothes", titleCn: "服装", bgColor: 0xffb6c1,
-        vocabulary: [
-            { en: "T-shirt", cn: "T恤", phonetic: "/ˈtiː ʃɜːt/" },
-            { en: "skirt", cn: "裙子", phonetic: "/skɜːt/" },
-            { en: "shorts", cn: "短裤", phonetic: "/ʃɔːts/" },
-            { en: "shirt", cn: "衬衫", phonetic: "/ʃɜːt/" },
-            { en: "trousers", cn: "裤子", phonetic: "/ˈtraʊzəz/" },
-            { en: "scarf", cn: "围巾", phonetic: "/skɑːf/" },
-            { en: "sweater", cn: "毛衣", phonetic: "/ˈswetə(r)/" },
-            { en: "dress", cn: "连衣裙", phonetic: "/dres/" },
-            { en: "coat", cn: "外套", phonetic: "/kəʊt/" },
-            { en: "hat", cn: "帽子", phonetic: "/hæt/" },
-            { en: "party", cn: "聚会", phonetic: "/ˈpɑːti/" },
-            { en: "wrong", cn: "错误的", phonetic: "/rɒŋ/" },
-            { en: "clever", cn: "聪明的", phonetic: "/ˈklevə(r)/" },
-            { en: "uniform", cn: "制服", phonetic: "/ˈjuːnɪfɔːm/" },
-            { en: "cool", cn: "凉爽的", phonetic: "/kuːl/" },
-        ],
-        phrases: [
-            { en: "wear a T-shirt", cn: "穿T恤" },
-            { en: "look for", cn: "寻找" },
-            { en: "cut up", cn: "剪开" },
-            { en: "make clothes", cn: "做衣服" },
-            { en: "school uniform", cn: "校服" },
-            { en: "get...wrong", cn: "把...弄错" },
-        ],
-        sentences: [
-            { en: "What are you wearing today?", cn: "你今天穿了什么？" },
-            { en: "I'm wearing a T-shirt and shorts.", cn: "我穿了T恤和短裤。" },
-            { en: "What do you want to wear to the party?", cn: "你想穿什么去派对？" },
-            { en: "I want to wear my favourite blue dress.", cn: "我想穿我最喜欢的蓝裙子。" },
-            { en: "Is Mum cutting up my dress?", cn: "妈妈在剪我的裙子吗？" },
-            { en: "It's cold outside. Wear a coat.", cn: "外面冷，穿上外套。" },
-        ],
-        grammar: {
-            title: "穿着表达 & should建议",
-            rules: ["What + be + 主语 + wearing?(问穿着)", "主语+be+wearing+衣物(答穿着)", "should+动词原形(建议)"],
-            quizOptions: {
-                "What ___ you wearing?": ["are", "is", "am"],
-                "She ___ wearing a pink dress.": ["is", "are", "am"],
-                "You ___ wear a coat. It's cold.": ["should", "shoulds", "shoulding"],
-                "I want to ___ my blue dress.": ["wear", "wearing", "wears"],
-                "___ Mum cutting up my dress?": ["Is", "Are", "Do"],
-            }
-        },
-        phonics: { pattern: "ea→/iː/, ee→/iː/, oa→/əʊ/, or→/ɔː/", words: [{ en: "teach", phonetic: "/tiːtʃ/" }, { en: "coat", phonetic: "/kəʊt/" }, { en: "shorts", phonetic: "/ʃɔːts/" },] }
-    }
-};
-// Level configurations - Phase 3 will have full 24 levels
-const LEVELS = {};
-
-// Placeholder: Will be populated in Phase 3
-console.log('Levels data loaded (placeholder)');
-class Boss extends Phaser.GameObjects.Container {
-    constructor(scene, x, y) {
-        super(scene, x, y);
-        scene.add.existing(this);
-
-        // Use a hidden physics sprite as the body (avoids isParent error with Container physics)
-        this._bodySprite = scene.add.zone(x, y, 60, 60);
-        scene.physics.add.existing(this._bodySprite, false);
-        this._bodySprite.body.setImmovable(true);
-        this._bodySprite.body.setAllowGravity(false);
-
-        this.hp = 3;
-        this.maxHp = 3;
-        this.defeated = false;
-
-        // Boss body (large, menacing)
-        const body = scene.add.graphics();
-        body.fillStyle(0x4a148c);
-        body.fillCircle(0, 0, 30);
-        body.fillStyle(0x7b2d8e);
-        body.fillCircle(-8, -12, 10);
-        body.fillCircle(8, -12, 10);
-        // Red eyes
-        body.fillStyle(0xff0000);
-        body.fillCircle(-10, -8, 6);
-        body.fillCircle(10, -8, 6);
-        body.fillStyle(0xffff00);
-        body.fillCircle(-10, -8, 3);
-        body.fillCircle(10, -8, 3);
-        // Mouth
-        body.fillStyle(0xffffff);
-        body.fillRect(-12, 8, 24, 8);
-        body.fillStyle(0x333333);
-        for (let i = 0; i < 4; i++) {
-            body.fillRect(-10 + i * 6, 10, 3, 3);
-        }
-        // Crown
-        body.fillStyle(0xffd700);
-        body.fillTriangle(-15, -28, 0, -44, 15, -28);
-        body.fillTriangle(-18, -28, -5, -38, 8, -28);
-        body.fillTriangle(-8, -28, 5, -38, 18, -28);
-        this.add(body);
-
-        // HP bar background
-        const hpBg = scene.add.graphics();
-        hpBg.fillStyle(0x333333);
-        hpBg.fillRect(-35, -55, 70, 8);
-        this.add(hpBg);
-
-        // HP bar foreground
-        this.hpBar = scene.add.graphics();
-        this.updateHpBar();
-        this.add(this.hpBar);
-
-        // Boss label
-        const label = scene.add.text(0, -65, 'BOSS', {
-            fontSize: '12px',
-            fontFamily: 'Arial',
-            fontStyle: 'bold',
-            color: '#ff6b6b',
-            stroke: '#000',
-            strokeThickness: 2
-        }).setOrigin(0.5);
-        this.add(label);
-
-        // Bobbing animation (moves the container AND the body sprite together)
-        this.initY = y;
-        scene.tweens.add({
-            targets: this,
-            y: y - 10,
-            duration: 800,
-            yoyo: true,
-            repeat: -1,
-            ease: 'Sine.easeInOut',
-            onUpdate: () => {
-                this._bodySprite.y = this.y;
-                this._bodySprite.x = this.x;
-            }
-        });
-    }
-
-    updateHpBar() {
-        this.hpBar.clear();
-        const ratio = this.hp / this.maxHp;
-        const color = ratio > 0.6 ? 0x4caf50 : ratio > 0.3 ? 0xff9800 : 0xff0000;
-        this.hpBar.fillStyle(color);
-        this.hpBar.fillRect(-35, -55, 70 * ratio, 8);
-    }
-
-    takeDamage() {
-        if (this.defeated) return false;
-        this.hp--;
-        this.updateHpBar();
-
-        this.scene.tweens.add({
-            targets: this,
-            alpha: 0.3,
-            duration: 100,
-            yoyo: true,
-            repeat: 2
-        });
-
-        if (this.hp <= 0) {
-            this.defeat();
-            return true;
-        }
-        return false;
-    }
-
-    defeat() {
-        this.defeated = true;
-        this._bodySprite.body.enable = false;
-        this.scene.cameras.main.shake(400, 0.02);
-        for (let i = 0; i < 15; i++) {
-            const sparkle = this.scene.add.image(
-                this.x + Phaser.Math.Between(-30, 30),
-                this.y + Phaser.Math.Between(-30, 30),
-                'sparkle'
-            ).setScale(1.5);
-            this.scene.tweens.add({
-                targets: sparkle,
-                x: sparkle.x + Phaser.Math.Between(-80, 80),
-                y: sparkle.y - Phaser.Math.Between(30, 80),
-                alpha: 0,
-                scale: 0,
-                duration: 600,
-                onComplete: () => sparkle.destroy()
-            });
-        }
-
-        const vText = this.scene.add.text(this.x, this.y - 50, '击败Boss!', {
-            fontSize: '18px',
-            fontFamily: 'Arial',
-            fontStyle: 'bold',
-            color: '#ffd700',
-            stroke: '#333',
-            strokeThickness: 3
-        }).setOrigin(0.5);
-        this.scene.tweens.add({
-            targets: vText,
-            y: this.y - 70,
-            alpha: 0,
-            duration: 1200,
-            onComplete: () => vText.destroy()
-        });
-
-        this.scene.time.delayedCall(800, () => {
-            this.destroy();
-        });
-    }
-}
+// --- js/entities/Player.js ---
 class Player extends Phaser.Physics.Arcade.Sprite {
     constructor(scene, x, y) {
         super(scene, x, y, 'player_idle');
@@ -1250,6 +952,9 @@ class Player extends Phaser.Physics.Arcade.Sprite {
         });
     }
 }
+
+
+// --- js/entities/QuestionBlock.js ---
 // Question block entity
 class QuestionBlock extends Phaser.Physics.Arcade.Sprite {
     constructor(scene, x, y) {
@@ -1266,6 +971,9 @@ class QuestionBlock extends Phaser.Physics.Arcade.Sprite {
         return true;
     }
 }
+
+
+// --- js/entities/Coin.js ---
 // Coin entity
 class Coin extends Phaser.Physics.Arcade.Sprite {
     constructor(scene, x, y) {
@@ -1275,6 +983,9 @@ class Coin extends Phaser.Physics.Arcade.Sprite {
         this.body.setAllowGravity(false);
     }
 }
+
+
+// --- js/entities/Enemy.js ---
 // Enemy entity - supports ground patrol, flying, and projectile types
 class Enemy extends Phaser.Physics.Arcade.Sprite {
     constructor(scene, x, y, type) {
@@ -1388,6 +1099,163 @@ class Enemy extends Phaser.Physics.Arcade.Sprite {
         });
     }
 }
+
+
+// --- js/entities/Boss.js ---
+class Boss extends Phaser.GameObjects.Container {
+    constructor(scene, x, y) {
+        super(scene, x, y);
+        scene.add.existing(this);
+
+        // Use a hidden physics sprite as the body (avoids isParent error with Container physics)
+        this._bodySprite = scene.add.zone(x, y, 60, 60);
+        scene.physics.add.existing(this._bodySprite, false);
+        this._bodySprite.body.setImmovable(true);
+        this._bodySprite.body.setAllowGravity(false);
+
+        this.hp = 3;
+        this.maxHp = 3;
+        this.defeated = false;
+
+        // Boss body (large, menacing)
+        const body = scene.add.graphics();
+        body.fillStyle(0x4a148c);
+        body.fillCircle(0, 0, 30);
+        body.fillStyle(0x7b2d8e);
+        body.fillCircle(-8, -12, 10);
+        body.fillCircle(8, -12, 10);
+        // Red eyes
+        body.fillStyle(0xff0000);
+        body.fillCircle(-10, -8, 6);
+        body.fillCircle(10, -8, 6);
+        body.fillStyle(0xffff00);
+        body.fillCircle(-10, -8, 3);
+        body.fillCircle(10, -8, 3);
+        // Mouth
+        body.fillStyle(0xffffff);
+        body.fillRect(-12, 8, 24, 8);
+        body.fillStyle(0x333333);
+        for (let i = 0; i < 4; i++) {
+            body.fillRect(-10 + i * 6, 10, 3, 3);
+        }
+        // Crown
+        body.fillStyle(0xffd700);
+        body.fillTriangle(-15, -28, 0, -44, 15, -28);
+        body.fillTriangle(-18, -28, -5, -38, 8, -28);
+        body.fillTriangle(-8, -28, 5, -38, 18, -28);
+        this.add(body);
+
+        // HP bar background
+        const hpBg = scene.add.graphics();
+        hpBg.fillStyle(0x333333);
+        hpBg.fillRect(-35, -55, 70, 8);
+        this.add(hpBg);
+
+        // HP bar foreground
+        this.hpBar = scene.add.graphics();
+        this.updateHpBar();
+        this.add(this.hpBar);
+
+        // Boss label
+        const label = scene.add.text(0, -65, 'BOSS', {
+            fontSize: '12px',
+            fontFamily: 'Arial',
+            fontStyle: 'bold',
+            color: '#ff6b6b',
+            stroke: '#000',
+            strokeThickness: 2
+        }).setOrigin(0.5);
+        this.add(label);
+
+        // Bobbing animation (moves the container AND the body sprite together)
+        this.initY = y;
+        scene.tweens.add({
+            targets: this,
+            y: y - 10,
+            duration: 800,
+            yoyo: true,
+            repeat: -1,
+            ease: 'Sine.easeInOut',
+            onUpdate: () => {
+                this._bodySprite.y = this.y;
+                this._bodySprite.x = this.x;
+            }
+        });
+    }
+
+    updateHpBar() {
+        this.hpBar.clear();
+        const ratio = this.hp / this.maxHp;
+        const color = ratio > 0.6 ? 0x4caf50 : ratio > 0.3 ? 0xff9800 : 0xff0000;
+        this.hpBar.fillStyle(color);
+        this.hpBar.fillRect(-35, -55, 70 * ratio, 8);
+    }
+
+    takeDamage() {
+        if (this.defeated) return false;
+        this.hp--;
+        this.updateHpBar();
+
+        this.scene.tweens.add({
+            targets: this,
+            alpha: 0.3,
+            duration: 100,
+            yoyo: true,
+            repeat: 2
+        });
+
+        if (this.hp <= 0) {
+            this.defeat();
+            return true;
+        }
+        return false;
+    }
+
+    defeat() {
+        this.defeated = true;
+        this._bodySprite.body.enable = false;
+        this.scene.cameras.main.shake(400, 0.02);
+        for (let i = 0; i < 15; i++) {
+            const sparkle = this.scene.add.image(
+                this.x + Phaser.Math.Between(-30, 30),
+                this.y + Phaser.Math.Between(-30, 30),
+                'sparkle'
+            ).setScale(1.5);
+            this.scene.tweens.add({
+                targets: sparkle,
+                x: sparkle.x + Phaser.Math.Between(-80, 80),
+                y: sparkle.y - Phaser.Math.Between(30, 80),
+                alpha: 0,
+                scale: 0,
+                duration: 600,
+                onComplete: () => sparkle.destroy()
+            });
+        }
+
+        const vText = this.scene.add.text(this.x, this.y - 50, '击败Boss!', {
+            fontSize: '18px',
+            fontFamily: 'Arial',
+            fontStyle: 'bold',
+            color: '#ffd700',
+            stroke: '#333',
+            strokeThickness: 3
+        }).setOrigin(0.5);
+        this.scene.tweens.add({
+            targets: vText,
+            y: this.y - 70,
+            alpha: 0,
+            duration: 1200,
+            onComplete: () => vText.destroy()
+        });
+
+        this.scene.time.delayedCall(800, () => {
+            this.destroy();
+        });
+    }
+}
+
+
+// --- js/scenes/BootScene.js ---
 class BootScene extends Phaser.Scene {
     constructor() {
         super({ key: 'BootScene' });
@@ -1663,6 +1531,9 @@ class BootScene extends Phaser.Scene {
         pg.destroy();
     }
 }
+
+
+// --- js/scenes/MenuScene.js ---
 class MenuScene extends Phaser.Scene {
     constructor() {
         super({ key: 'MenuScene' });
@@ -1849,6 +1720,9 @@ class MenuScene extends Phaser.Scene {
         flower.fillCircle(x + 3, y - 2, 3);
     }
 }
+
+
+// --- js/scenes/WorldSelectScene.js ---
 class WorldSelectScene extends Phaser.Scene {
     constructor() {
         super({ key: 'WorldSelectScene' });
@@ -2002,6 +1876,9 @@ class WorldSelectScene extends Phaser.Scene {
         this.cameras.main.fadeIn(400);
     }
 }
+
+
+// --- js/scenes/GameScene.js ---
 class GameScene extends Phaser.Scene {
     constructor() {
         super({ key: 'GameScene' });
@@ -2509,11 +2386,22 @@ class GameScene extends Phaser.Scene {
         let actualType = qType;
         const questionCount = this.questionsAnswered || 0;
         if (this.levelType === 'vocabulary') {
-            actualType = questionCount % 3 === 0 ? 'vocabulary'
-                : questionCount % 3 === 1 ? 'listening'
-                : 'phonics';
+            const vocabMod = questionCount % 5;
+            if (vocabMod === 0) actualType = 'vocabulary';
+            else if (vocabMod === 1) actualType = 'listening';
+            else if (vocabMod === 2) actualType = 'spelling';
+            else if (vocabMod === 3) actualType = 'cloze';
+            else actualType = 'phonics';
         } else if (this.levelType === 'grammar') {
-            actualType = questionCount % 2 === 0 ? 'grammar' : 'vocabulary';
+            const gramMod = questionCount % 3;
+            if (gramMod === 0) actualType = 'grammar';
+            else if (gramMod === 1) actualType = 'cloze';
+            else actualType = 'vocabulary';
+        } else if (this.levelType === 'sentence') {
+            const sentMod = questionCount % 3;
+            if (sentMod === 0) actualType = 'sentence';
+            else if (sentMod === 1) actualType = 'cloze';
+            else actualType = 'vocabulary';
         }
 
         const isBossBlock = block.isBossBlock === true;
@@ -2836,6 +2724,9 @@ class GameScene extends Phaser.Scene {
         this.coinText.setText(this.collectedCoins.toString());
     }
 }
+
+
+// --- js/scenes/QuestionUI.js ---
 class QuestionUI {
     constructor(scene) {
         this.scene = scene;
@@ -2868,7 +2759,7 @@ class QuestionUI {
 
         // Question panel background
         const panelW = 500;
-        const panelH = questionData.type === 'sentence' ? 420 : 300;
+        const panelH = (questionData.type === 'sentence' || questionData.type === 'spelling' || questionData.type === 'cloze') ? 440 : 300;
         const panelX = width / 2;
         const panelY = height / 2;
 
@@ -2885,14 +2776,18 @@ class QuestionUI {
             listening: '听力',
             sentence: '句型',
             grammar: '语法',
-            phonics: '语音'
+            phonics: '语音',
+            spelling: '拼写',
+            cloze: '填空'
         };
         const badgeColors = {
             vocabulary: 0xffb6c1,
             listening: 0x87ceeb,
             sentence: 0xdda0dd,
             grammar: 0x90ee90,
-            phonics: 0xffd700
+            phonics: 0xffd700,
+            spelling: 0xffa07a,
+            cloze: 0xb0c4de
         };
         const badgeColor = badgeColors[questionData.type] || 0xffb6c1;
         const badge = scene.add.graphics().setScrollFactor(0).setDepth(202);
@@ -2958,10 +2853,9 @@ class QuestionUI {
         const choiceStartY = questionData.type === 'sentence' ? panelY - 10 : panelY;
 
         if (questionData.type === 'sentence') {
-            // Sentence ordering: show words as draggable/clickable items
-            // For simplicity, show as multiple choice (pick the right order)
-            // Actually show individual word buttons that form the sentence
             this.createSentenceOrderUI(scene, panelX, panelY, questionData, elements, choiceButtons, onAnswer);
+        } else if (questionData.type === 'spelling') {
+            this.createSpellingUI(scene, panelX, panelY, questionData, elements, choiceButtons, onAnswer);
         } else {
             // Standard multiple choice
             const choiceLabels = ['A', 'B', 'C', 'D'];
@@ -3158,6 +3052,200 @@ class QuestionUI {
         });
     }
 
+    createSpellingUI(scene, panelX, panelY, questionData, elements, choiceButtons, onAnswer) {
+        const blanks = questionData.blanks;
+        const letterChoices = questionData.choices;
+        const panelW = 500;
+
+        // Current filled state per blank index
+        const filledState = blanks.map(b => b.filled || '');
+
+        // Blanks display row — show each letter position as a box
+        const blankSlots = [];
+        const blankSize = 32;
+        const blankGap = 8;
+        const totalBlankW = blanks.length * blankSize + (blanks.length - 1) * blankGap;
+        const blankStartX = panelX - totalBlankW / 2 + blankSize / 2;
+        const blankY = panelY - 5;
+
+        blanks.forEach((b, i) => {
+            const bx = blankStartX + i * (blankSize + blankGap);
+
+            if (b.hidden) {
+                // Empty slot to fill
+                const slotBg = scene.add.graphics().setScrollFactor(0).setDepth(202);
+                slotBg.fillStyle(0xfff0f5);
+                slotBg.fillRoundedRect(bx - blankSize / 2, blankY - blankSize / 2, blankSize, blankSize, 6);
+                slotBg.lineStyle(2, 0xff69b4);
+                slotBg.strokeRoundedRect(bx - blankSize / 2, blankY - blankSize / 2, blankSize, blankSize, 6);
+
+                const slotText = scene.add.text(bx, blankY, filledState[i] || '', {
+                    fontSize: '18px', fontFamily: 'Arial', fontStyle: 'bold', color: '#ff69b4'
+                }).setOrigin(0.5).setScrollFactor(0).setDepth(203);
+
+                const hitZone = scene.add.zone(bx, blankY, blankSize + 4, blankSize + 4)
+                    .setInteractive({ useHandCursor: true }).setScrollFactor(0).setDepth(204);
+
+                const slotIdx = i;
+                hitZone.on('pointerdown', () => {
+                    if (filledState[slotIdx]) {
+                        // Undo: remove letter from this slot
+                        filledState[slotIdx] = '';
+                        slotText.setText('');
+                        // Re-enable the letter button if it was used
+                        choiceButtons.forEach(cb => {
+                            if (cb.letter === blanks[slotIdx].letter && cb.used) {
+                                cb.used = false;
+                                if (cb.bg) cb.bg.setAlpha(1);
+                                if (cb.text) cb.text.setAlpha(1);
+                                if (cb.zone) cb.zone.setInteractive({ useHandCursor: true });
+                            }
+                        });
+                        // Update all letter buttons' used state
+                        this._updateLetterUsedState(choiceButtons, filledState, blanks);
+                    }
+                });
+
+                elements.push(slotBg, slotText, hitZone);
+                blankSlots.push({ bg: slotBg, text: slotText, zone: hitZone, index: i, hidden: true });
+            } else {
+                // Pre-filled letter (given)
+                const slotBg = scene.add.graphics().setScrollFactor(0).setDepth(202);
+                slotBg.fillStyle(0xf0f0f0);
+                slotBg.fillRoundedRect(bx - blankSize / 2, blankY - blankSize / 2, blankSize, blankSize, 6);
+                slotBg.lineStyle(1, 0xcccccc);
+                slotBg.strokeRoundedRect(bx - blankSize / 2, blankY - blankSize / 2, blankSize, blankSize, 6);
+
+                const slotText = scene.add.text(bx, blankY, b.letter, {
+                    fontSize: '18px', fontFamily: 'Arial', fontStyle: 'bold', color: '#999999'
+                }).setOrigin(0.5).setScrollFactor(0).setDepth(203);
+
+                elements.push(slotBg, slotText);
+                blankSlots.push({ bg: slotBg, text: slotText, index: i, hidden: false });
+            }
+        });
+
+        // Letter choice buttons below the blanks
+        const letterBtnSize = 34;
+        const letterGap = 6;
+        const letterCols = Math.min(letterChoices.length, 8);
+        const letterRows = Math.ceil(letterChoices.length / letterCols);
+        const letterStartY = blankY + 40;
+
+        letterChoices.forEach((letter, i) => {
+            const col = i % letterCols;
+            const row = Math.floor(i / letterCols);
+            const lx = panelX - ((letterCols - 1) * (letterBtnSize + letterGap)) / 2 + col * (letterBtnSize + letterGap);
+            const ly = letterStartY + row * (letterBtnSize + letterGap);
+
+            const btnBg = scene.add.graphics().setScrollFactor(0).setDepth(202);
+            btnBg.fillStyle(0xffb6c1, 0.3);
+            btnBg.fillRoundedRect(lx - letterBtnSize / 2, ly - letterBtnSize / 2, letterBtnSize, letterBtnSize, 6);
+            btnBg.lineStyle(2, 0xff69b4);
+            btnBg.strokeRoundedRect(lx - letterBtnSize / 2, ly - letterBtnSize / 2, letterBtnSize, letterBtnSize, 6);
+
+            const letterText = scene.add.text(lx, ly, letter.toUpperCase(), {
+                fontSize: '16px', fontFamily: 'Arial', fontStyle: 'bold', color: '#ff1493'
+            }).setOrigin(0.5).setScrollFactor(0).setDepth(203);
+
+            const hitZone = scene.add.zone(lx, ly, letterBtnSize + 4, letterBtnSize + 4)
+                .setInteractive({ useHandCursor: true }).setScrollFactor(0).setDepth(204);
+
+            const cb = { bg: btnBg, text: letterText, zone: hitZone, letter: letter, used: false };
+            choiceButtons.push(cb);
+
+            hitZone.on('pointerdown', () => {
+                if (cb.used) return;
+                // Find first empty hidden blank
+                const emptyIdx = blanks.findIndex((b, bi) => b.hidden && !filledState[bi]);
+                if (emptyIdx === -1) return;
+                filledState[emptyIdx] = letter;
+                cb.used = true;
+                btnBg.setAlpha(0.2);
+                letterText.setAlpha(0.2);
+                hitZone.disableInteractive();
+
+                // Update blank slot display
+                const targetSlot = blankSlots.find(s => s.index === emptyIdx && s.hidden);
+                if (targetSlot) targetSlot.text.setText(letter.toUpperCase());
+
+                // Auto-check if all blanks filled
+                if (blanks.every((b, bi) => !b.hidden || filledState[bi])) {
+                    const userWord = blanks.map((b, bi) =>
+                        b.hidden ? filledState[bi].toLowerCase() : b.letter
+                    ).join('');
+                    const isCorrect = userWord === questionData.correctAnswer;
+                    this.handleAnswer(questionData, isCorrect ? 0 : -1, onAnswer, elements, choiceButtons, panelX, panelY);
+                }
+            });
+
+            elements.push(btnBg, letterText, hitZone);
+        });
+
+        // Clear button
+        const clearY = letterStartY + letterRows * (letterBtnSize + letterGap) + 14;
+        const clearBtnW = 100;
+        const clearBtnH = 30;
+        const clearBg = scene.add.graphics().setScrollFactor(0).setDepth(202);
+        clearBg.fillStyle(0xffb6b6, 0.4);
+        clearBg.fillRoundedRect(panelX - clearBtnW / 2, clearY - clearBtnH / 2, clearBtnW, clearBtnH, 8);
+        clearBg.lineStyle(1, 0xff6b6b);
+        clearBg.strokeRoundedRect(panelX - clearBtnW / 2, clearY - clearBtnH / 2, clearBtnW, clearBtnH, 8);
+
+        const clearText = scene.add.text(panelX, clearY, '全部清除', {
+            fontSize: '13px', fontFamily: 'Arial', color: '#ff6b6b'
+        }).setOrigin(0.5).setScrollFactor(0).setDepth(203);
+
+        const clearZone = scene.add.zone(panelX, clearY, clearBtnW, clearBtnH)
+            .setInteractive({ useHandCursor: true }).setScrollFactor(0).setDepth(204);
+
+        clearZone.on('pointerdown', () => {
+            // Reset all fills
+            blanks.forEach((b, i) => { if (b.hidden) filledState[i] = ''; });
+            blankSlots.forEach(s => { if (s.hidden) s.text.setText(''); });
+            choiceButtons.forEach(cb => {
+                if (cb.letter !== undefined) {
+                    cb.used = false;
+                    if (cb.bg) cb.bg.setAlpha(1);
+                    if (cb.text) cb.text.setAlpha(1);
+                    if (cb.zone) cb.zone.setInteractive({ useHandCursor: true });
+                }
+            });
+            this._updateLetterUsedState(choiceButtons, filledState, blanks);
+        });
+
+        elements.push(clearBg, clearText, clearZone);
+    }
+
+    _updateLetterUsedState(choiceButtons, filledState, blanks) {
+        // Reset all letter buttons
+        choiceButtons.forEach(cb => {
+            if (cb.letter !== undefined) {
+                cb.used = false;
+                if (cb.bg) cb.bg.setAlpha(1);
+                if (cb.text) cb.text.setAlpha(1);
+                if (cb.zone) cb.zone.setInteractive({ useHandCursor: true });
+            }
+        });
+        // Mark used ones based on filledState
+        const usedLetters = [];
+        blanks.forEach((b, i) => {
+            if (b.hidden && filledState[i]) usedLetters.push(filledState[i]);
+        });
+        // Simple matching: mark first unused instance of each used letter
+        const remaining = [...usedLetters];
+        choiceButtons.forEach(cb => {
+            if (cb.letter !== undefined && remaining.includes(cb.letter)) {
+                const idx = remaining.indexOf(cb.letter);
+                remaining.splice(idx, 1);
+                cb.used = true;
+                if (cb.bg) cb.bg.setAlpha(0.2);
+                if (cb.text) cb.text.setAlpha(0.2);
+                if (cb.zone) cb.zone.disableInteractive();
+            }
+        });
+    }
+
     drawConfirmBtn(gfx, x, y, w, h, color) {
         gfx.clear();
         gfx.fillStyle(color, 0.9);
@@ -3174,7 +3262,10 @@ class QuestionUI {
             });
         }
 
-        const correct = userIndex === questionData.correctIndex;
+        // For spelling, correct is determined by the passed userIndex (0 = correct, -1 = wrong)
+        const correct = questionData.type === 'spelling'
+            ? (userIndex === 0)
+            : (userIndex === questionData.correctIndex);
         const scene = this.scene;
 
         // Show feedback
@@ -3317,6 +3408,9 @@ class QuestionUI {
         this.scene.physics.resume();
     }
 }
+
+
+// --- js/scenes/ResultScene.js ---
 class ResultScene extends Phaser.Scene {
     constructor() {
         super({ key: 'ResultScene' });
@@ -3480,6 +3574,644 @@ class ResultScene extends Phaser.Scene {
         this.cameras.main.fadeIn(500);
     }
 }
+
+
+// --- js/data/units.js ---
+// Six units learning content — 新外研版四年级下册
+// Source: 单词表+课文逐句翻译+单元重点知识总结
+const UNITS = {
+    1: {
+        id: 1, title: "People at Work", titleCn: "职业", bgColor: 0x87ceeb,
+        vocabulary: [
+            { en: "doctor", cn: "医生", phonetic: "/ˈdɒktə(r)/" },
+            { en: "fireman", cn: "消防队员", phonetic: "/ˈfaɪəmən/" },
+            { en: "farmer", cn: "农民", phonetic: "/ˈfɑːmə(r)/" },
+            { en: "cook", cn: "厨师", phonetic: "/kʊk/" },
+            { en: "police officer", cn: "警察，警官", phonetic: "/pəˈliːs ˈɒfɪsə(r)/" },
+            { en: "nurse", cn: "护士", phonetic: "/nɜːs/" },
+            { en: "driver", cn: "司机，驾驶员", phonetic: "/ˈdraɪvə(r)/" },
+            { en: "scientist", cn: "科学家", phonetic: "/ˈsaɪəntɪst/" },
+            { en: "painter", cn: "画家", phonetic: "/ˈpeɪntə(r)/" },
+            { en: "writer", cn: "作家；作者", phonetic: "/ˈraɪtə(r)/" },
+            { en: "worker", cn: "工人", phonetic: "/ˈwɜːkə(r)/" },
+            { en: "postman", cn: "邮递员", phonetic: "/ˈpəʊstmən/" },
+            { en: "taxi", cn: "出租车，计程车", phonetic: "/ˈtæksi/" },
+            { en: "station", cn: "所；站；台；局", phonetic: "/ˈsteɪʃn/" },
+            { en: "police station", cn: "警察（分）局，派出所", phonetic: "/pəˈliːs ˈsteɪʃn/" },
+            { en: "field", cn: "田地，田野", phonetic: "/fiːld/" },
+            { en: "night", cn: "夜晚，夜间", phonetic: "/naɪt/" },
+            { en: "owl", cn: "猫头鹰", phonetic: "/aʊl/" },
+            { en: "night owl", cn: "夜猫子", phonetic: "/naɪt aʊl/" },
+            { en: "aunt", cn: "姑母；姨母", phonetic: "/ɑːnt/" },
+            { en: "uncle", cn: "叔叔，伯伯", phonetic: "/ˈʌŋkl/" },
+            { en: "bake", cn: "烘，烤，焙", phonetic: "/beɪk/" },
+            { en: "bee", cn: "蜜蜂", phonetic: "/biː/" },
+            { en: "same", cn: "相同的，一模一样的", phonetic: "/seɪm/" },
+            { en: "sound", cn: "声，声音", phonetic: "/saʊnd/" },
+            { en: "life", cn: "生活", phonetic: "/laɪf/" },
+            { en: "mountain", cn: "高山", phonetic: "/ˈmaʊntən/" },
+            { en: "use", cn: "用，使用", phonetic: "/juːz/" },
+            { en: "brush", cn: "刷子；毛刷", phonetic: "/brʌʃ/" },
+            { en: "often", cn: "经常，时常", phonetic: "/ˈɒfn/" },
+            { en: "safe", cn: "安全的", phonetic: "/seɪf/" },
+            { en: "light", cn: "照亮", phonetic: "/laɪt/" },
+        ],
+        phrases: [
+            { en: "help sick people", cn: "帮助病人" },
+            { en: "go to work", cn: "去上班" },
+            { en: "do one's job", cn: "做某人的工作" },
+            { en: "work in a hospital", cn: "在医院工作" },
+            { en: "work at school", cn: "在学校工作" },
+            { en: "work on a farm", cn: "在农场工作" },
+            { en: "drive a car", cn: "开车" },
+            { en: "cook food", cn: "做饭" },
+            { en: "teach students", cn: "教学生" },
+            { en: "grow vegetables", cn: "种蔬菜" },
+            { en: "protect people", cn: "保护人们" },
+            { en: "light up the night", cn: "照亮夜晚" },
+            { en: "keep the city safe", cn: "维护城市安全" },
+            { en: "take people home", cn: "送人们回家" },
+            { en: "make the best cake", cn: "做最好吃的蛋糕" },
+        ],
+        sentences: [
+            { en: "What does Lingling's father do?", cn: "玲玲的爸爸是做什么的？" },
+            { en: "He's a scientist!", cn: "他是一名科学家！" },
+            { en: "What's your father's job?", cn: "你爸爸的工作是什么？" },
+            { en: "What does your mother do?", cn: "你妈妈是做什么的？" },
+            { en: "She's a nurse. She helps sick people.", cn: "她是一名护士，她帮助病人。" },
+            { en: "He works in a hospital.", cn: "他在医院工作。" },
+            { en: "Is your uncle a driver?", cn: "你叔叔是司机吗？" },
+            { en: "Yes, he is. He drives a bus.", cn: "是的，他开公交车。" },
+            { en: "Where does your aunt work?", cn: "你姑姑在哪里工作？" },
+            { en: "She works on a farm. She grows fruit.", cn: "她在农场工作，她种水果。" },
+            { en: "My brother is a teacher. He teaches English at school.", cn: "我哥哥是老师，他在学校教英语。" },
+            { en: "What do you want to be when you grow up?", cn: "你长大后想做什么？" },
+            { en: "I want to be a police officer. I want to protect people.", cn: "我想成为警察，我想保护人们。" },
+            { en: "Uncle Jake likes to bake. He can make the best cake.", cn: "杰克叔叔喜欢烘焙，他能做出最好吃的蛋糕。" },
+            { en: "He works hard, day after day. He is like a bee, very busy.", cn: "他日复一日努力工作，像蜜蜂一样忙碌。" },
+            { en: "So many people work at night. They light up the night for others.", cn: "这么多人在夜间工作，他们为他人照亮了夜晚。" },
+        ],
+        grammar: {
+            title: "三单 & 职业问答",
+            rules: [
+                "What's...job? = What does...do? 问职业",
+                "主语he/she/it时动词加-s或-es",
+                "以s/x/ch/sh/o结尾加-es；辅音+y结尾变y为i加-es"
+            ],
+            quizOptions: {
+                "What ___ your father's job?": ["is", "are", "does"],
+                "He ___ in a hospital.": ["works", "work", "working"],
+                "She is ___ nurse.": ["a", "an", "the"],
+                "What ___ your mother do?": ["does", "do", "is"],
+                "My father ___ English at school.": ["teaches", "teach", "teaching"],
+                "Is your sister ___ driver?": ["a", "an", "the"],
+                "He ___ a bus every day.": ["drives", "drive", "driving"],
+                "Where does your aunt ___?": ["work", "works", "working"],
+            }
+        },
+        phonics: {
+            pattern: "or → /ɔː/ ; er → /ə(r)/",
+            words: [
+                { en: "work", phonetic: "/wɜːk/" },
+                { en: "doctor", phonetic: "/ˈdɒktə(r)/" },
+                { en: "worker", phonetic: "/ˈwɜːkə(r)/" },
+                { en: "teacher", phonetic: "/ˈtiːtʃə(r)/" },
+                { en: "farmer", phonetic: "/ˈfɑːmə(r)/" },
+                { en: "driver", phonetic: "/ˈdraɪvə(r)/" },
+            ]
+        }
+    },
+
+    2: {
+        id: 2, title: "How do you feel today?", titleCn: "情绪", bgColor: 0xffdab9,
+        vocabulary: [
+            { en: "laugh", cn: "发出笑声，（大）笑", phonetic: "/lɑːf/" },
+            { en: "sad", cn: "不愉快的，伤心的", phonetic: "/sæd/" },
+            { en: "scared", cn: "害怕的，恐惧的", phonetic: "/skeəd/" },
+            { en: "angry", cn: "发怒的，生气的", phonetic: "/ˈæŋɡri/" },
+            { en: "excited", cn: "兴奋的，激动的", phonetic: "/ɪkˈsaɪtɪd/" },
+            { en: "opera", cn: "歌剧", phonetic: "/ˈɒprə/" },
+            { en: "next", cn: "紧接着的；下次的", phonetic: "/nekst/" },
+            { en: "cough", cn: "咳嗽，咳", phonetic: "/kɒf/" },
+            { en: "better", cn: "好转的；减轻的", phonetic: "/ˈbetə(r)/" },
+            { en: "gift", cn: "礼物", phonetic: "/ɡɪft/" },
+            { en: "model", cn: "模型", phonetic: "/ˈmɒdl/" },
+            { en: "shout", cn: "大声说，喊叫", phonetic: "/ʃaʊt/" },
+            { en: "should", cn: "应当，应该", phonetic: "/ʃʊd/" },
+            { en: "feeling", cn: "感觉，感触", phonetic: "/ˈfiːlɪŋ/" },
+            { en: "huge", cn: "巨大的", phonetic: "/hjuːdʒ/" },
+            { en: "worried", cn: "担心的，焦虑的", phonetic: "/ˈwʌrid/" },
+            { en: "street", cn: "大街，街道", phonetic: "/striːt/" },
+            { en: "hit", cn: "撞击，碰撞", phonetic: "/hɪt/" },
+            { en: "happy", cn: "开心的，快乐的", phonetic: "/ˈhæpi/" },
+            { en: "cry", cn: "哭", phonetic: "/kraɪ/" },
+            { en: "shake", cn: "摇晃，抖动", phonetic: "/ʃeɪk/" },
+            { en: "surprised", cn: "惊讶的", phonetic: "/səˈpraɪzd/" },
+            { en: "practise", cn: "练习", phonetic: "/ˈpræktɪs/" },
+            { en: "break", cn: "弄坏，打破", phonetic: "/breɪk/" },
+        ],
+        phrases: [
+            { en: "feel happy", cn: "感到开心" },
+            { en: "feel sad", cn: "感到伤心" },
+            { en: "feel angry", cn: "感到生气" },
+            { en: "feel scared", cn: "感到害怕" },
+            { en: "feel excited", cn: "感到兴奋" },
+            { en: "feel worried", cn: "感到担心" },
+            { en: "take part in", cn: "参加" },
+            { en: "Beijing opera show", cn: "京剧表演" },
+            { en: "get well soon", cn: "早日康复" },
+            { en: "a birthday gift", cn: "生日礼物" },
+            { en: "ship model", cn: "轮船模型" },
+            { en: "shout at sb.", cn: "对某人大喊" },
+            { en: "make a mistake", cn: "犯错误" },
+            { en: "be proud of", cn: "为……感到自豪" },
+        ],
+        sentences: [
+            { en: "How do you feel today?", cn: "你今天感觉怎么样？" },
+            { en: "I feel happy. I laugh and dance around.", cn: "我感到开心，我笑着，四处跳舞。" },
+            { en: "I feel sad. I cry and talk to a friend.", cn: "我感到难过，我哭着和朋友倾诉。" },
+            { en: "I feel angry. I stop and count to three.", cn: "我感到生气，我停下来数到三。" },
+            { en: "I feel scared. I share it with my family.", cn: "我感到害怕，我和家人分享。" },
+            { en: "I feel excited. I jump and say, 'Hooray!'", cn: "我感到兴奋，我跳起来说'好耶！'" },
+            { en: "Why are you sad?", cn: "你为什么伤心？" },
+            { en: "Because I can't take part in the Beijing opera show.", cn: "因为我不能参加京剧表演了。" },
+            { en: "Is she coughing?", cn: "她在咳嗽吗？" },
+            { en: "Yes, she is. She can't talk.", cn: "是的，她在咳，她没法说话。" },
+            { en: "I am feeling better now.", cn: "我现在感觉好多了。" },
+            { en: "Jay is very surprised and happy when he gets the new ship model.", cn: "杰伊收到新船模时又惊喜又开心。" },
+            { en: "He is shouting at Ray because Ray breaks his ship.", cn: "他在对雷大喊，因为雷弄坏了他的船。" },
+            { en: "We should say sorry when we make a mistake.", cn: "我们犯错时应该道歉。" },
+            { en: "Are you still feeling worried?", cn: "你还在担心吗？" },
+            { en: "No, I'm not. I feel great now.", cn: "不了，我现在感觉好极了。" },
+            { en: "What makes you happy?", cn: "什么让你开心？" },
+            { en: "Playing with my friends makes me happy.", cn: "和朋友一起玩让我开心。" },
+        ],
+        grammar: {
+            title: "情感表达 & 现在进行时 & should",
+            rules: [
+                "主语+be/feel+形容词 表示感受",
+                "主语+be+动词-ing 表示正在进行的动作",
+                "should+动词原形 表示应当/应该",
+                "Because引导原因状语从句回答Why问句"
+            ],
+            quizOptions: {
+                "I ___ happy today.": ["feel", "feels", "feeling"],
+                "She ___ coughing now.": ["is", "are", "am"],
+                "You ___ say sorry to your friend.": ["should", "shoulds", "shoulding"],
+                "Why ___ you sad?": ["are", "is", "am"],
+                "He is ___ at Ray.": ["shouting", "shout", "shouts"],
+                "She ___ worried about her test.": ["feels", "feel", "feeling"],
+                "We should help ___ other.": ["each", "every", "one"],
+                "___ she feeling better now?": ["Is", "Are", "Does"],
+            }
+        },
+        phonics: {
+            pattern: "ee → /iː/ ; ea → /e/ ; y → /i/ ; ou → /aʊ/",
+            words: [
+                { en: "feel", phonetic: "/fiːl/" },
+                { en: "see", phonetic: "/siː/" },
+                { en: "head", phonetic: "/hed/" },
+                { en: "bread", phonetic: "/bred/" },
+                { en: "angry", phonetic: "/ˈæŋɡri/" },
+                { en: "happy", phonetic: "/ˈhæpi/" },
+                { en: "shout", phonetic: "/ʃaʊt/" },
+                { en: "out", phonetic: "/aʊt/" },
+            ]
+        }
+    },
+
+    3: {
+        id: 3, title: "Everyone's got talent!", titleCn: "才能", bgColor: 0xdda0dd,
+        vocabulary: [
+            { en: "talent", cn: "天资，天赋，才能", phonetic: "/ˈtælənt/" },
+            { en: "act", cn: "演出；扮演", phonetic: "/ækt/" },
+            { en: "magic", cn: "魔术，戏法", phonetic: "/ˈmædʒɪk/" },
+            { en: "shine", cn: "表现突出，出众", phonetic: "/ʃaɪn/" },
+            { en: "puzzle", cn: "拼图游戏", phonetic: "/ˈpʌzl/" },
+            { en: "dancer", cn: "舞蹈演员", phonetic: "/ˈdɑːnsə(r)/" },
+            { en: "win", cn: "获胜，赢", phonetic: "/wɪn/" },
+            { en: "just", cn: "就，只是", phonetic: "/dʒʌst/" },
+            { en: "boy", cn: "男孩；儿子", phonetic: "/bɔɪ/" },
+            { en: "slowly", cn: "缓慢地，慢慢地", phonetic: "/ˈsləʊli/" },
+            { en: "duck", cn: "鸭子", phonetic: "/dʌk/" },
+            { en: "fly", cn: "飞", phonetic: "/flaɪ/" },
+            { en: "run", cn: "跑", phonetic: "/rʌn/" },
+            { en: "swim", cn: "游泳", phonetic: "/swɪm/" },
+            { en: "sing", cn: "唱歌", phonetic: "/sɪŋ/" },
+            { en: "piano", cn: "钢琴", phonetic: "/piˈænəʊ/" },
+            { en: "photo", cn: "照片", phonetic: "/ˈfəʊtəʊ/" },
+            { en: "worry", cn: "担心", phonetic: "/ˈwʌri/" },
+            { en: "clothes", cn: "衣服", phonetic: "/kləʊðz/" },
+            { en: "beautiful", cn: "美丽的", phonetic: "/ˈbjuːtɪfl/" },
+            { en: "teach", cn: "教", phonetic: "/tiːtʃ/" },
+            { en: "practise", cn: "练习", phonetic: "/ˈpræktɪs/" },
+            { en: "brush", cn: "刷子；毛笔", phonetic: "/brʌʃ/" },
+            { en: "write", cn: "写", phonetic: "/raɪt/" },
+            { en: "hard", cn: "努力地", phonetic: "/hɑːd/" },
+            { en: "enough", cn: "足够的", phonetic: "/ɪˈnʌf/" },
+            { en: "good", cn: "好的", phonetic: "/ɡʊd/" },
+            { en: "great", cn: "棒的", phonetic: "/ɡreɪt/" },
+            { en: "cook", cn: "做饭；厨师", phonetic: "/kʊk/" },
+        ],
+        phrases: [
+            { en: "be good at", cn: "擅长" },
+            { en: "play the piano", cn: "弹钢琴" },
+            { en: "take photos", cn: "拍照" },
+            { en: "do magic", cn: "变魔术" },
+            { en: "do puzzles", cn: "玩拼图" },
+            { en: "win the show", cn: "赢得比赛" },
+            { en: "hard work", cn: "努力工作" },
+            { en: "teach sb. to do sth.", cn: "教某人做某事" },
+            { en: "make sb. shine", cn: "让某人闪耀" },
+            { en: "practise dancing", cn: "练习跳舞" },
+            { en: "fly well", cn: "飞得好" },
+            { en: "run fast", cn: "跑得快" },
+            { en: "swim well", cn: "游得好" },
+            { en: "sing loudly", cn: "大声唱歌" },
+            { en: "wear beautiful clothes", cn: "穿漂亮衣服" },
+        ],
+        sentences: [
+            { en: "Everyone's got talent!", cn: "每个人都有才能！" },
+            { en: "What are you doing?", cn: "你们在做什么？" },
+            { en: "I'm looking at their clothes.", cn: "我在看他们的衣服。" },
+            { en: "Don't worry about your clothes. Just go and dance.", cn: "别担心你的衣服，去跳舞就好。" },
+            { en: "Who is the best dancer?", cn: "谁是最棒的舞者？" },
+            { en: "Lingling is the best dancer. She wins the show!", cn: "玲玲是最棒的舞者，她赢了比赛！" },
+            { en: "Is she good at dancing?", cn: "她擅长跳舞吗？" },
+            { en: "Yes, she is. She dances very well.", cn: "是的，她跳得很好。" },
+            { en: "What is the Little Chicken good at?", cn: "小鸡擅长什么？" },
+            { en: "He is good at singing. He sings so well!", cn: "他擅长唱歌，他唱得真好！" },
+            { en: "Why are you crying, my boy?", cn: "孩子，你为什么哭呀？" },
+            { en: "Because I'm not good at anything.", cn: "因为我什么都不擅长。" },
+            { en: "Talent is not enough. Hard work makes me shine.", cn: "只有才能还不够，努力让我闪闪发光。" },
+            { en: "What's your talent?", cn: "你的才能是什么？" },
+            { en: "My talent is taking photos. I can take beautiful photos.", cn: "我的才能是拍照，我能拍出漂亮的照片。" },
+            { en: "I write all the time. I write day and night.", cn: "我一直都在写，日夜不停地写。" },
+        ],
+        grammar: {
+            title: "现在进行时 & be good at & Don't祈使句",
+            rules: [
+                "What+be+主语+doing? 问正在做什么",
+                "主语+be+动词-ing 答正在进行的动作",
+                "be good at+名词/动词-ing 表示擅长",
+                "Don't+动词原形 否定祈使句",
+                "Why引导问句用Because回答"
+            ],
+            quizOptions: {
+                "She is good ___ dancing.": ["at", "in", "on"],
+                "___ worry about your clothes.": ["Don't", "Not", "No"],
+                "What ___ you doing?": ["are", "is", "am"],
+                "He is good at ___ the piano.": ["playing", "play", "plays"],
+                "Just go and ___!": ["dance", "dancing", "dances"],
+                "Why ___ you crying?": ["are", "is", "do"],
+                "Lingling ___ the best dancer.": ["is", "are", "am"],
+                "I'm not good ___ anything.": ["at", "in", "on"],
+            }
+        },
+        phonics: {
+            pattern: "ee → /iː/ ; ea → /iː/ ; y → /i/ ; ow → /əʊ/ ; or → /ɔː/",
+            words: [
+                { en: "see", phonetic: "/siː/" },
+                { en: "meet", phonetic: "/miːt/" },
+                { en: "teach", phonetic: "/tiːtʃ/" },
+                { en: "please", phonetic: "/pliːz/" },
+                { en: "happy", phonetic: "/ˈhæpi/" },
+                { en: "easy", phonetic: "/ˈiːzi/" },
+                { en: "show", phonetic: "/ʃəʊ/" },
+                { en: "grow", phonetic: "/ɡrəʊ/" },
+                { en: "work", phonetic: "/wɜːk/" },
+                { en: "short", phonetic: "/ʃɔːt/" },
+            ]
+        }
+    },
+
+    4: {
+        id: 4, title: "Plant life", titleCn: "植物", bgColor: 0x90ee90,
+        vocabulary: [
+            { en: "seed", cn: "种子，籽", phonetic: "/siːd/" },
+            { en: "earth", cn: "泥土，土壤", phonetic: "/ɜːθ/" },
+            { en: "root", cn: "根", phonetic: "/ruːt/" },
+            { en: "stem", cn: "茎，梗，柄", phonetic: "/stem/" },
+            { en: "thin", cn: "细的", phonetic: "/θɪn/" },
+            { en: "leaf", cn: "叶，叶子", phonetic: "/liːf/" },
+            { en: "dig", cn: "挖，掘", phonetic: "/dɪɡ/" },
+            { en: "sunflower", cn: "向日葵", phonetic: "/ˈsʌnflaʊə(r)/" },
+            { en: "plant", cn: "种植，栽种；播（种）", phonetic: "/plɑːnt/" },
+            { en: "dream", cn: "梦想，愿望，理想", phonetic: "/driːm/" },
+            { en: "sleep", cn: "睡，睡觉", phonetic: "/sliːp/" },
+            { en: "will", cn: "将，会，要", phonetic: "/wɪl/" },
+            { en: "true", cn: "真的，真实的", phonetic: "/truː/" },
+            { en: "come true", cn: "实现", phonetic: "/kʌm truː/" },
+            { en: "paper", cn: "纸", phonetic: "/ˈpeɪpə(r)/" },
+            { en: "life", cn: "生命；生活", phonetic: "/laɪf/" },
+            { en: "field", cn: "田地，田野", phonetic: "/fiːld/" },
+            { en: "grain", cn: "谷物，粮食", phonetic: "/ɡreɪn/" },
+            { en: "grow", cn: "生长，成长", phonetic: "/ɡrəʊ/" },
+            { en: "water", cn: "浇水；水", phonetic: "/ˈwɔːtə(r)/" },
+            { en: "flower", cn: "花", phonetic: "/ˈflaʊə(r)/" },
+            { en: "wheat", cn: "小麦", phonetic: "/wiːt/" },
+            { en: "cotton", cn: "棉花", phonetic: "/ˈkɒtn/" },
+            { en: "mouse", cn: "老鼠", phonetic: "/maʊs/" },
+            { en: "miss", cn: "想念", phonetic: "/mɪs/" },
+            { en: "feed", cn: "喂养，养活", phonetic: "/fiːd/" },
+            { en: "everything", cn: "所有东西", phonetic: "/ˈevriθɪŋ/" },
+        ],
+        phrases: [
+            { en: "plant life", cn: "植物生命" },
+            { en: "parts of a plant", cn: "植物的组成部分" },
+            { en: "plant seeds", cn: "播种" },
+            { en: "dig the earth", cn: "挖土" },
+            { en: "water the plants", cn: "给植物浇水" },
+            { en: "grow up", cn: "长大" },
+            { en: "in the fields", cn: "在田地里" },
+            { en: "grow rice", cn: "种水稻" },
+            { en: "feed the world", cn: "养活全世界" },
+            { en: "make paper", cn: "造纸" },
+            { en: "use plants", cn: "利用植物" },
+            { en: "a small garden", cn: "一个小花园" },
+            { en: "come true", cn: "实现" },
+            { en: "grow into", cn: "长成" },
+        ],
+        sentences: [
+            { en: "I'm a little seed, small and cute.", cn: "我是一颗小小的种子，小巧又可爱。" },
+            { en: "Put me in the earth, and watch me grow.", cn: "把我种进泥土里，看着我长大。" },
+            { en: "My stem is thin. My leaves are green.", cn: "我的茎细细的，我的叶子绿油油的。" },
+            { en: "What are you doing?", cn: "你们在做什么？" },
+            { en: "We're digging the earth. We're making a small garden for the class.", cn: "我们在挖土，我们要给班级建一个小花园！" },
+            { en: "Are your seeds growing?", cn: "你们的种子发芽了吗？" },
+            { en: "Yes, they are. Look! The leaves are coming out.", cn: "是的，发芽了。你看！叶子长出来了。" },
+            { en: "Why aren't Sam's seeds growing?", cn: "为什么山姆的种子不发芽？" },
+            { en: "Because those seeds can't grow. Let's plant a new one.", cn: "因为这些种子不会发芽，我们来种一颗新的。" },
+            { en: "Huahua's grandpa is a scientist. He works in the fields.", cn: "花花的爷爷是一位科学家，他在田里工作。" },
+            { en: "Grandpa has two dreams. He wants to grow tall rice plants with big grains.", cn: "爷爷有两个梦想，他想种出高高的稻株结出大谷粒。" },
+            { en: "He also wants to feed the world with his rice.", cn: "他还想用自己种的稻谷养活全世界的人。" },
+            { en: "I think his dreams will come true.", cn: "我相信他的梦想一定会实现。" },
+            { en: "What do we use plants for?", cn: "我们用植物做什么？" },
+            { en: "We use plants to make paper and we also use them to make food.", cn: "我们用植物造纸，也用它做食物。" },
+            { en: "We use cotton to make clothes.", cn: "我们用棉花做衣服。" },
+        ],
+        grammar: {
+            title: "现在进行时 & will将来时 & use...to",
+            rules: [
+                "What+be+主语+doing? 问正在做什么",
+                "主语+will+动词原形 表示将来",
+                "use...to do... 表示用……做……",
+                "Why问句用Because回答原因"
+            ],
+            quizOptions: {
+                "We ___ digging the earth.": ["are", "is", "am"],
+                "The seed ___ grow into a flower.": ["will", "wills", "willing"],
+                "We use cotton ___ make clothes.": ["to", "for", "in"],
+                "___ your seeds growing?": ["Are", "Is", "Do"],
+                "Why ___ the flower dying?": ["is", "are", "do"],
+                "Grandpa's dreams will ___ true.": ["come", "comes", "coming"],
+                "We are ___ a small garden.": ["making", "make", "makes"],
+                "Let ___ plant a new one!": ["me", "I", "my"],
+            }
+        },
+        phonics: {
+            pattern: "ee → /iː/ ; ea → /e/ ; ow → /aʊ/ ; oo → /uː/ ; or → /ɔː/",
+            words: [
+                { en: "seed", phonetic: "/siːd/" },
+                { en: "green", phonetic: "/ɡriːn/" },
+                { en: "earth", phonetic: "/ɜːθ/" },
+                { en: "head", phonetic: "/hed/" },
+                { en: "flower", phonetic: "/ˈflaʊə(r)/" },
+                { en: "how", phonetic: "/haʊ/" },
+                { en: "root", phonetic: "/ruːt/" },
+                { en: "cool", phonetic: "/kuːl/" },
+                { en: "corn", phonetic: "/kɔːn/" },
+                { en: "born", phonetic: "/bɔːn/" },
+            ]
+        }
+    },
+
+    5: {
+        id: 5, title: "School events", titleCn: "校园活动", bgColor: 0xfffacd,
+        vocabulary: [
+            { en: "drama", cn: "戏剧", phonetic: "/ˈdrɑːmə/" },
+            { en: "trip", cn: "旅游；旅行，出行", phonetic: "/trɪp/" },
+            { en: "fair", cn: "集市；义卖会", phonetic: "/feə(r)/" },
+            { en: "festival", cn: "节，节庆，汇演", phonetic: "/ˈfestɪvl/" },
+            { en: "horn", cn: "角", phonetic: "/hɔːn/" },
+            { en: "dot", cn: "点，小圆点", phonetic: "/dɒt/" },
+            { en: "raindrop", cn: "雨点，雨滴", phonetic: "/ˈreɪndrɒp/" },
+            { en: "more", cn: "更多的", phonetic: "/mɔː(r)/" },
+            { en: "special", cn: "特殊的，特别的", phonetic: "/ˈspeʃl/" },
+            { en: "keeper", cn: "看守人，保管人", phonetic: "/ˈkiːpə(r)/" },
+            { en: "lovely", cn: "美好的；可爱的", phonetic: "/ˈlʌvli/" },
+            { en: "student", cn: "学生", phonetic: "/ˈstjuːdnt/" },
+            { en: "culture", cn: "文化", phonetic: "/ˈkʌltʃə(r)/" },
+            { en: "hour", cn: "小时", phonetic: "/ˈaʊə(r)/" },
+            { en: "note", cn: "笔记，记录", phonetic: "/nəʊt/" },
+            { en: "vote", cn: "选票", phonetic: "/vəʊt/" },
+            { en: "design", cn: "设计", phonetic: "/dɪˈzaɪn/" },
+            { en: "hometown", cn: "家乡，故乡", phonetic: "/ˈhəʊmtaʊn/" },
+            { en: "event", cn: "活动；事件", phonetic: "/ɪˈvent/" },
+            { en: "science", cn: "科学", phonetic: "/ˈsaɪəns/" },
+            { en: "book", cn: "书", phonetic: "/bʊk/" },
+            { en: "picnic", cn: "野餐", phonetic: "/ˈpɪknɪk/" },
+            { en: "sports", cn: "运动", phonetic: "/spɔːts/" },
+            { en: "art", cn: "艺术", phonetic: "/ɑːt/" },
+            { en: "draw", cn: "画画", phonetic: "/drɔː/" },
+            { en: "paint", cn: "绘画", phonetic: "/peɪnt/" },
+            { en: "nature", cn: "自然", phonetic: "/ˈneɪtʃə(r)/" },
+            { en: "forest", cn: "森林", phonetic: "/ˈfɒrɪst/" },
+            { en: "baby", cn: "婴儿；幼崽", phonetic: "/ˈbeɪbi/" },
+            { en: "fall", cn: "落下，掉落", phonetic: "/fɔːl/" },
+            { en: "nest", cn: "巢，窝", phonetic: "/nest/" },
+            { en: "family", cn: "家庭", phonetic: "/ˈfæməli/" },
+        ],
+        phrases: [
+            { en: "school events", cn: "校园活动" },
+            { en: "Science Day", cn: "科学日" },
+            { en: "Book Week", cn: "读书周" },
+            { en: "Drama Night", cn: "戏剧之夜" },
+            { en: "Picnic Day", cn: "野餐日" },
+            { en: "Music Week", cn: "音乐周" },
+            { en: "Field Trip", cn: "实地考察" },
+            { en: "School Fair", cn: "校园集市" },
+            { en: "Sports Day", cn: "运动会" },
+            { en: "Art Festival", cn: "艺术节" },
+            { en: "nature hunt", cn: "自然探索" },
+            { en: "forest keeper", cn: "森林管理员" },
+            { en: "take notes", cn: "做笔记" },
+            { en: "give a vote", cn: "投票" },
+            { en: "go back home", cn: "回家" },
+            { en: "fall off", cn: "从……掉下来" },
+        ],
+        sentences: [
+            { en: "What school events do you have?", cn: "你们有什么校园活动？" },
+            { en: "We have Science Day, Book Week and Sports Day.", cn: "我们有科学日、读书周和运动会。" },
+            { en: "I love the Art Festival! Me too!", cn: "我喜欢艺术节！我也是！" },
+            { en: "There are so many things to see!", cn: "有好多东西可以看！" },
+            { en: "Are you drawing, Daming?", cn: "大明，你在画画吗？" },
+            { en: "No, I'm writing Chinese words.", cn: "不，我在写汉字。" },
+            { en: "There are horns on this picture. Is it a cow?", cn: "这幅画上有角，是奶牛吗？" },
+            { en: "Yes! Those small dots look like raindrops.", cn: "是的！那些小点看起来像雨滴。" },
+            { en: "Where are you going for the field trip?", cn: "你们要去哪里实地考察？" },
+            { en: "We're going to a forest. We'll have a nature hunt there.", cn: "我们要去森林，在那里做自然探索。" },
+            { en: "Look! There's a baby bird. It falls off the tree.", cn: "看！有只雏鸟，它从树上掉下来了。" },
+            { en: "Are there any other baby birds in the tree?", cn: "树上还有其他小鸟吗？" },
+            { en: "Yes, there are two baby birds in the nest.", cn: "有，窝里有两只小鸟。" },
+            { en: "The mother bird is back. What a happy family!", cn: "鸟妈妈回来了，多么幸福的一家！" },
+            { en: "Can we go around the world in two hours?", cn: "我们能两小时环游世界吗？" },
+            { en: "Yes, you can! Go to the culture fair.", cn: "是的，你可以！去文化集市吧。" },
+        ],
+        grammar: {
+            title: "There be 句型 & 现在进行时 & should",
+            rules: [
+                "There is+单数名词 / There are+复数名词+地点",
+                "Is/Are there...? 疑问句型",
+                "be+not+动词-ing 现在进行时否定",
+                "should+动词原形 表示建议",
+                "be going to+动词原形 表示计划"
+            ],
+            quizOptions: {
+                "There ___ a baby bird in the tree.": ["is", "are", "am"],
+                "There ___ many stands in the fair.": ["are", "is", "am"],
+                "___ there any games?": ["Are", "Is", "Do"],
+                "There isn't ___ book on the desk.": ["a", "any", "some"],
+                "We ___ help the baby bird.": ["should", "shoulds", "shoulding"],
+                "I'm not ___. I'm writing.": ["drawing", "draw", "draws"],
+                "We ___ going to have a field trip.": ["are", "is", "am"],
+                "Look, there ___ some pink flowers.": ["are", "is", "am"],
+            }
+        },
+        phonics: {
+            pattern: "ee → /iː/ ; ea → /e/ ; ai → /eɪ/ ; or → /ɔː/ ; ur → /ɜː/",
+            words: [
+                { en: "week", phonetic: "/wiːk/" },
+                { en: "see", phonetic: "/siː/" },
+                { en: "weather", phonetic: "/ˈweðə(r)/" },
+                { en: "head", phonetic: "/hed/" },
+                { en: "paint", phonetic: "/peɪnt/" },
+                { en: "rain", phonetic: "/reɪn/" },
+                { en: "sport", phonetic: "/spɔːt/" },
+                { en: "for", phonetic: "/fɔː(r)/" },
+                { en: "turn", phonetic: "/tɜːn/" },
+                { en: "hurt", phonetic: "/hɜːt/" },
+            ]
+        }
+    },
+
+    6: {
+        id: 6, title: "Cool clothes", titleCn: "服装", bgColor: 0xffb6c1,
+        vocabulary: [
+            { en: "T-shirt", cn: "T恤（衫）", phonetic: "/ˈtiː ʃɜːt/" },
+            { en: "skirt", cn: "半身裙，裙子", phonetic: "/skɜːt/" },
+            { en: "shorts", cn: "短裤", phonetic: "/ʃɔːts/" },
+            { en: "shirt", cn: "衬衫", phonetic: "/ʃɜːt/" },
+            { en: "trousers", cn: "裤子", phonetic: "/ˈtraʊzəz/" },
+            { en: "scarf", cn: "围巾", phonetic: "/skɑːf/" },
+            { en: "sweater", cn: "毛线衣，羊毛衫", phonetic: "/ˈswetə(r)/" },
+            { en: "dress", cn: "连衣裙", phonetic: "/dres/" },
+            { en: "coat", cn: "外套", phonetic: "/kəʊt/" },
+            { en: "hat", cn: "帽子", phonetic: "/hæt/" },
+            { en: "party", cn: "聚会，宴会", phonetic: "/ˈpɑːti/" },
+            { en: "dressmaker", cn: "裁缝", phonetic: "/ˈdresmeɪkə(r)/" },
+            { en: "wrong", cn: "不正确的，错误的", phonetic: "/rɒŋ/" },
+            { en: "clever", cn: "聪明的", phonetic: "/ˈklevə(r)/" },
+            { en: "Mr", cn: "先生", phonetic: "/ˈmɪstə(r)/" },
+            { en: "uniform", cn: "制服", phonetic: "/ˈjuːnɪfɔːm/" },
+            { en: "robe", cn: "长袍", phonetic: "/rəʊb/" },
+            { en: "cool", cn: "凉爽的；酷的", phonetic: "/kuːl/" },
+            { en: "hot", cn: "热的", phonetic: "/hɒt/" },
+            { en: "cold", cn: "冷的", phonetic: "/kəʊld/" },
+            { en: "wear", cn: "穿，戴", phonetic: "/weə(r)/" },
+            { en: "look", cn: "看；看起来", phonetic: "/lʊk/" },
+            { en: "find", cn: "找到", phonetic: "/faɪnd/" },
+            { en: "cut", cn: "剪，切", phonetic: "/kʌt/" },
+            { en: "make", cn: "制作", phonetic: "/meɪk/" },
+            { en: "small", cn: "小的", phonetic: "/smɔːl/" },
+            { en: "big", cn: "大的", phonetic: "/bɪɡ/" },
+            { en: "nice", cn: "好看的；美好的", phonetic: "/naɪs/" },
+            { en: "beautiful", cn: "漂亮的", phonetic: "/ˈbjuːtɪfl/" },
+            { en: "same", cn: "相同的", phonetic: "/seɪm/" },
+            { en: "name", cn: "名字", phonetic: "/neɪm/" },
+        ],
+        phrases: [
+            { en: "wear a T-shirt", cn: "穿T恤" },
+            { en: "wear a skirt", cn: "穿裙子" },
+            { en: "wear shorts", cn: "穿短裤" },
+            { en: "wear a scarf", cn: "戴围巾" },
+            { en: "wear a dress", cn: "穿连衣裙" },
+            { en: "look for", cn: "寻找" },
+            { en: "cut up", cn: "剪开" },
+            { en: "make clothes", cn: "做衣服" },
+            { en: "school uniform", cn: "校服" },
+            { en: "the same as", cn: "和……一样" },
+            { en: "get...wrong", cn: "把……弄错" },
+            { en: "a birthday present", cn: "生日礼物" },
+            { en: "fashion show", cn: "时装表演" },
+            { en: "Christmas party", cn: "圣诞聚会" },
+        ],
+        sentences: [
+            { en: "Sun, wind, rain or snow. Look outside and pick your clothes.", cn: "阳光、风、雨或雪，看看外面挑选衣服。" },
+            { en: "It's hot, hot, hot! T-shirt, skirt or shorts.", cn: "好热好热好热！T恤、裙子或短裤。" },
+            { en: "It's cool, cool, cool! Hat, shirt and trousers.", cn: "好凉爽！帽子、衬衫和长裤。" },
+            { en: "It's cold, cold, cold! Scarf, sweater and coat.", cn: "好冷好冷好冷！围巾、毛衣和外套。" },
+            { en: "What are you wearing today?", cn: "你今天穿了什么？" },
+            { en: "I'm wearing a T-shirt and shorts.", cn: "我穿了T恤和短裤。" },
+            { en: "What do you want to wear to the party?", cn: "你想穿什么去派对？" },
+            { en: "I want to wear my favourite blue dress.", cn: "我想穿我最喜欢的蓝色连衣裙。" },
+            { en: "Lingling, what are you doing?", cn: "玲玲，你在做什么？" },
+            { en: "I'm looking for my blue dress.", cn: "我在找我的蓝色连衣裙。" },
+            { en: "Mum, are you cutting up my dress?", cn: "妈妈，你是不是在剪我的裙子？" },
+            { en: "Don't worry. I have an idea.", cn: "别担心，我有个主意。" },
+            { en: "What does Tom do? He's a dressmaker. He makes clothes for animals.", cn: "汤姆是做什么的？他是个裁缝，给动物做衣服。" },
+            { en: "It's cold outside. You should wear a coat and a scarf.", cn: "外面冷，你应该穿外套和围巾。" },
+            { en: "What's the weather like? It's hot. So I wear a T-shirt.", cn: "天气怎么样？很热，所以我穿T恤。" },
+            { en: "Can you make clothes from old materials?", cn: "你能用旧材料做衣服吗？" },
+        ],
+        grammar: {
+            title: "穿着表达 & 现在进行时 & should建议",
+            rules: [
+                "What+be+主语+wearing? 问穿着",
+                "主语+be+wearing+衣物 答穿着",
+                "主语+be+动词-ing 表示正在进行的动作",
+                "should+动词原形 表示建议",
+                "Why问句用Because回答"
+            ],
+            quizOptions: {
+                "What ___ you wearing?": ["are", "is", "am"],
+                "She ___ wearing a pink dress.": ["is", "are", "am"],
+                "You ___ wear a coat. It's cold.": ["should", "shoulds", "shoulding"],
+                "I want to ___ my blue dress.": ["wear", "wearing", "wears"],
+                "___ Mum cutting up my dress?": ["Is", "Are", "Do"],
+                "I'm ___ for my blue dress.": ["looking", "look", "looks"],
+                "Why do you ___ a sweater?": ["wear", "wearing", "wears"],
+                "Lingling is wearing ___ favourite dress.": ["her", "his", "she"],
+            }
+        },
+        phonics: {
+            pattern: "ea → /iː/ ; ee → /iː/ ; oa → /əʊ/ ; or → /ɔː/ ; y → /i/",
+            words: [
+                { en: "teach", phonetic: "/tiːtʃ/" },
+                { en: "season", phonetic: "/ˈsiːzn/" },
+                { en: "see", phonetic: "/siː/" },
+                { en: "coat", phonetic: "/kəʊt/" },
+                { en: "boat", phonetic: "/bəʊt/" },
+                { en: "shorts", phonetic: "/ʃɔːts/" },
+                { en: "fork", phonetic: "/fɔːk/" },
+                { en: "party", phonetic: "/ˈpɑːti/" },
+                { en: "happy", phonetic: "/ˈhæpi/" },
+                { en: "funny", phonetic: "/ˈfʌni/" },
+            ]
+        }
+    }
+};
+
+
+// --- js/data/levels.js ---
+// Level configurations - Phase 3 will have full 24 levels
+const LEVELS = {};
+
+// Placeholder: Will be populated in Phase 3
+console.log('Levels data loaded (placeholder)');
+
+
+// --- js/boot.js ---
 // Game configuration and bootstrap
 const GAME_WIDTH = 800;
 const GAME_HEIGHT = 480;
@@ -3537,6 +4269,7 @@ const config = {
 
 const game = new Phaser.Game(config);
 window.game = game;
+
     </script>
 </body>
 </html>

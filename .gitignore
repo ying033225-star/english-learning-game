@@ -23,5 +23,8 @@ test_*.mjs
 *-screenshot.png
 v*_screenshot.png
 
+# Test artifacts
+test-results/
+
 # Large reference files
 *.pdf

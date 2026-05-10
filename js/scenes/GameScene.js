@@ -505,11 +505,22 @@ class GameScene extends Phaser.Scene {
         let actualType = qType;
         const questionCount = this.questionsAnswered || 0;
         if (this.levelType === 'vocabulary') {
-            actualType = questionCount % 3 === 0 ? 'vocabulary'
-                : questionCount % 3 === 1 ? 'listening'
-                : 'phonics';
+            const vocabMod = questionCount % 5;
+            if (vocabMod === 0) actualType = 'vocabulary';
+            else if (vocabMod === 1) actualType = 'listening';
+            else if (vocabMod === 2) actualType = 'spelling';
+            else if (vocabMod === 3) actualType = 'cloze';
+            else actualType = 'phonics';
         } else if (this.levelType === 'grammar') {
-            actualType = questionCount % 2 === 0 ? 'grammar' : 'vocabulary';
+            const gramMod = questionCount % 3;
+            if (gramMod === 0) actualType = 'grammar';
+            else if (gramMod === 1) actualType = 'cloze';
+            else actualType = 'vocabulary';
+        } else if (this.levelType === 'sentence') {
+            const sentMod = questionCount % 3;
+            if (sentMod === 0) actualType = 'sentence';
+            else if (sentMod === 1) actualType = 'cloze';
+            else actualType = 'vocabulary';
         }
 
         const isBossBlock = block.isBossBlock === true;

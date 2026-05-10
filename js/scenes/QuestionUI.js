@@ -30,7 +30,7 @@ class QuestionUI {
 
         // Question panel background
         const panelW = 500;
-        const panelH = questionData.type === 'sentence' ? 420 : 300;
+        const panelH = (questionData.type === 'sentence' || questionData.type === 'spelling' || questionData.type === 'cloze') ? 440 : 300;
         const panelX = width / 2;
         const panelY = height / 2;
 
@@ -47,14 +47,18 @@ class QuestionUI {
             listening: '听力',
             sentence: '句型',
             grammar: '语法',
-            phonics: '语音'
+            phonics: '语音',
+            spelling: '拼写',
+            cloze: '填空'
         };
         const badgeColors = {
             vocabulary: 0xffb6c1,
             listening: 0x87ceeb,
             sentence: 0xdda0dd,
             grammar: 0x90ee90,
-            phonics: 0xffd700
+            phonics: 0xffd700,
+            spelling: 0xffa07a,
+            cloze: 0xb0c4de
         };
         const badgeColor = badgeColors[questionData.type] || 0xffb6c1;
         const badge = scene.add.graphics().setScrollFactor(0).setDepth(202);
@@ -120,10 +124,9 @@ class QuestionUI {
         const choiceStartY = questionData.type === 'sentence' ? panelY - 10 : panelY;
 
         if (questionData.type === 'sentence') {
-            // Sentence ordering: show words as draggable/clickable items
-            // For simplicity, show as multiple choice (pick the right order)
-            // Actually show individual word buttons that form the sentence
             this.createSentenceOrderUI(scene, panelX, panelY, questionData, elements, choiceButtons, onAnswer);
+        } else if (questionData.type === 'spelling') {
+            this.createSpellingUI(scene, panelX, panelY, questionData, elements, choiceButtons, onAnswer);
         } else {
             // Standard multiple choice
             const choiceLabels = ['A', 'B', 'C', 'D'];
@@ -320,6 +323,200 @@ class QuestionUI {
         });
     }
 
+    createSpellingUI(scene, panelX, panelY, questionData, elements, choiceButtons, onAnswer) {
+        const blanks = questionData.blanks;
+        const letterChoices = questionData.choices;
+        const panelW = 500;
+
+        // Current filled state per blank index
+        const filledState = blanks.map(b => b.filled || '');
+
+        // Blanks display row — show each letter position as a box
+        const blankSlots = [];
+        const blankSize = 32;
+        const blankGap = 8;
+        const totalBlankW = blanks.length * blankSize + (blanks.length - 1) * blankGap;
+        const blankStartX = panelX - totalBlankW / 2 + blankSize / 2;
+        const blankY = panelY - 5;
+
+        blanks.forEach((b, i) => {
+            const bx = blankStartX + i * (blankSize + blankGap);
+
+            if (b.hidden) {
+                // Empty slot to fill
+                const slotBg = scene.add.graphics().setScrollFactor(0).setDepth(202);
+                slotBg.fillStyle(0xfff0f5);
+                slotBg.fillRoundedRect(bx - blankSize / 2, blankY - blankSize / 2, blankSize, blankSize, 6);
+                slotBg.lineStyle(2, 0xff69b4);
+                slotBg.strokeRoundedRect(bx - blankSize / 2, blankY - blankSize / 2, blankSize, blankSize, 6);
+
+                const slotText = scene.add.text(bx, blankY, filledState[i] || '', {
+                    fontSize: '18px', fontFamily: 'Arial', fontStyle: 'bold', color: '#ff69b4'
+                }).setOrigin(0.5).setScrollFactor(0).setDepth(203);
+
+                const hitZone = scene.add.zone(bx, blankY, blankSize + 4, blankSize + 4)
+                    .setInteractive({ useHandCursor: true }).setScrollFactor(0).setDepth(204);
+
+                const slotIdx = i;
+                hitZone.on('pointerdown', () => {
+                    if (filledState[slotIdx]) {
+                        // Undo: remove letter from this slot
+                        filledState[slotIdx] = '';
+                        slotText.setText('');
+                        // Re-enable the letter button if it was used
+                        choiceButtons.forEach(cb => {
+                            if (cb.letter === blanks[slotIdx].letter && cb.used) {
+                                cb.used = false;
+                                if (cb.bg) cb.bg.setAlpha(1);
+                                if (cb.text) cb.text.setAlpha(1);
+                                if (cb.zone) cb.zone.setInteractive({ useHandCursor: true });
+                            }
+                        });
+                        // Update all letter buttons' used state
+                        this._updateLetterUsedState(choiceButtons, filledState, blanks);
+                    }
+                });
+
+                elements.push(slotBg, slotText, hitZone);
+                blankSlots.push({ bg: slotBg, text: slotText, zone: hitZone, index: i, hidden: true });
+            } else {
+                // Pre-filled letter (given)
+                const slotBg = scene.add.graphics().setScrollFactor(0).setDepth(202);
+                slotBg.fillStyle(0xf0f0f0);
+                slotBg.fillRoundedRect(bx - blankSize / 2, blankY - blankSize / 2, blankSize, blankSize, 6);
+                slotBg.lineStyle(1, 0xcccccc);
+                slotBg.strokeRoundedRect(bx - blankSize / 2, blankY - blankSize / 2, blankSize, blankSize, 6);
+
+                const slotText = scene.add.text(bx, blankY, b.letter, {
+                    fontSize: '18px', fontFamily: 'Arial', fontStyle: 'bold', color: '#999999'
+                }).setOrigin(0.5).setScrollFactor(0).setDepth(203);
+
+                elements.push(slotBg, slotText);
+                blankSlots.push({ bg: slotBg, text: slotText, index: i, hidden: false });
+            }
+        });
+
+        // Letter choice buttons below the blanks
+        const letterBtnSize = 34;
+        const letterGap = 6;
+        const letterCols = Math.min(letterChoices.length, 8);
+        const letterRows = Math.ceil(letterChoices.length / letterCols);
+        const letterStartY = blankY + 40;
+
+        letterChoices.forEach((letter, i) => {
+            const col = i % letterCols;
+            const row = Math.floor(i / letterCols);
+            const lx = panelX - ((letterCols - 1) * (letterBtnSize + letterGap)) / 2 + col * (letterBtnSize + letterGap);
+            const ly = letterStartY + row * (letterBtnSize + letterGap);
+
+            const btnBg = scene.add.graphics().setScrollFactor(0).setDepth(202);
+            btnBg.fillStyle(0xffb6c1, 0.3);
+            btnBg.fillRoundedRect(lx - letterBtnSize / 2, ly - letterBtnSize / 2, letterBtnSize, letterBtnSize, 6);
+            btnBg.lineStyle(2, 0xff69b4);
+            btnBg.strokeRoundedRect(lx - letterBtnSize / 2, ly - letterBtnSize / 2, letterBtnSize, letterBtnSize, 6);
+
+            const letterText = scene.add.text(lx, ly, letter.toUpperCase(), {
+                fontSize: '16px', fontFamily: 'Arial', fontStyle: 'bold', color: '#ff1493'
+            }).setOrigin(0.5).setScrollFactor(0).setDepth(203);
+
+            const hitZone = scene.add.zone(lx, ly, letterBtnSize + 4, letterBtnSize + 4)
+                .setInteractive({ useHandCursor: true }).setScrollFactor(0).setDepth(204);
+
+            const cb = { bg: btnBg, text: letterText, zone: hitZone, letter: letter, used: false };
+            choiceButtons.push(cb);
+
+            hitZone.on('pointerdown', () => {
+                if (cb.used) return;
+                // Find first empty hidden blank
+                const emptyIdx = blanks.findIndex((b, bi) => b.hidden && !filledState[bi]);
+                if (emptyIdx === -1) return;
+                filledState[emptyIdx] = letter;
+                cb.used = true;
+                btnBg.setAlpha(0.2);
+                letterText.setAlpha(0.2);
+                hitZone.disableInteractive();
+
+                // Update blank slot display
+                const targetSlot = blankSlots.find(s => s.index === emptyIdx && s.hidden);
+                if (targetSlot) targetSlot.text.setText(letter.toUpperCase());
+
+                // Auto-check if all blanks filled
+                if (blanks.every((b, bi) => !b.hidden || filledState[bi])) {
+                    const userWord = blanks.map((b, bi) =>
+                        b.hidden ? filledState[bi].toLowerCase() : b.letter
+                    ).join('');
+                    const isCorrect = userWord === questionData.correctAnswer;
+                    this.handleAnswer(questionData, isCorrect ? 0 : -1, onAnswer, elements, choiceButtons, panelX, panelY);
+                }
+            });
+
+            elements.push(btnBg, letterText, hitZone);
+        });
+
+        // Clear button
+        const clearY = letterStartY + letterRows * (letterBtnSize + letterGap) + 14;
+        const clearBtnW = 100;
+        const clearBtnH = 30;
+        const clearBg = scene.add.graphics().setScrollFactor(0).setDepth(202);
+        clearBg.fillStyle(0xffb6b6, 0.4);
+        clearBg.fillRoundedRect(panelX - clearBtnW / 2, clearY - clearBtnH / 2, clearBtnW, clearBtnH, 8);
+        clearBg.lineStyle(1, 0xff6b6b);
+        clearBg.strokeRoundedRect(panelX - clearBtnW / 2, clearY - clearBtnH / 2, clearBtnW, clearBtnH, 8);
+
+        const clearText = scene.add.text(panelX, clearY, '全部清除', {
+            fontSize: '13px', fontFamily: 'Arial', color: '#ff6b6b'
+        }).setOrigin(0.5).setScrollFactor(0).setDepth(203);
+
+        const clearZone = scene.add.zone(panelX, clearY, clearBtnW, clearBtnH)
+            .setInteractive({ useHandCursor: true }).setScrollFactor(0).setDepth(204);
+
+        clearZone.on('pointerdown', () => {
+            // Reset all fills
+            blanks.forEach((b, i) => { if (b.hidden) filledState[i] = ''; });
+            blankSlots.forEach(s => { if (s.hidden) s.text.setText(''); });
+            choiceButtons.forEach(cb => {
+                if (cb.letter !== undefined) {
+                    cb.used = false;
+                    if (cb.bg) cb.bg.setAlpha(1);
+                    if (cb.text) cb.text.setAlpha(1);
+                    if (cb.zone) cb.zone.setInteractive({ useHandCursor: true });
+                }
+            });
+            this._updateLetterUsedState(choiceButtons, filledState, blanks);
+        });
+
+        elements.push(clearBg, clearText, clearZone);
+    }
+
+    _updateLetterUsedState(choiceButtons, filledState, blanks) {
+        // Reset all letter buttons
+        choiceButtons.forEach(cb => {
+            if (cb.letter !== undefined) {
+                cb.used = false;
+                if (cb.bg) cb.bg.setAlpha(1);
+                if (cb.text) cb.text.setAlpha(1);
+                if (cb.zone) cb.zone.setInteractive({ useHandCursor: true });
+            }
+        });
+        // Mark used ones based on filledState
+        const usedLetters = [];
+        blanks.forEach((b, i) => {
+            if (b.hidden && filledState[i]) usedLetters.push(filledState[i]);
+        });
+        // Simple matching: mark first unused instance of each used letter
+        const remaining = [...usedLetters];
+        choiceButtons.forEach(cb => {
+            if (cb.letter !== undefined && remaining.includes(cb.letter)) {
+                const idx = remaining.indexOf(cb.letter);
+                remaining.splice(idx, 1);
+                cb.used = true;
+                if (cb.bg) cb.bg.setAlpha(0.2);
+                if (cb.text) cb.text.setAlpha(0.2);
+                if (cb.zone) cb.zone.disableInteractive();
+            }
+        });
+    }
+
     drawConfirmBtn(gfx, x, y, w, h, color) {
         gfx.clear();
         gfx.fillStyle(color, 0.9);
@@ -336,7 +533,10 @@ class QuestionUI {
             });
         }
 
-        const correct = userIndex === questionData.correctIndex;
+        // For spelling, correct is determined by the passed userIndex (0 = correct, -1 = wrong)
+        const correct = questionData.type === 'spelling'
+            ? (userIndex === 0)
+            : (userIndex === questionData.correctIndex);
         const scene = this.scene;
 
         // Show feedback

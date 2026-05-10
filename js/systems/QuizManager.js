@@ -27,6 +27,12 @@ class QuizManager {
             case 'phonics':
                 question = this.generatePhonicsQuestion();
                 break;
+            case 'spelling':
+                question = this.generateSpellingQuestion();
+                break;
+            case 'cloze':
+                question = this.generateClozeQuestion();
+                break;
             default:
                 question = this.generateVocabQuestion();
         }
@@ -188,6 +194,150 @@ class QuizManager {
             correctAnswer: `${correct.en} ${correct.phonetic || ''}`,
             audioText: correct.en,
             explain: `${correct.en} 包含 ${(phonics.pattern || '').split(',')[0]}`,
+            isReview: false
+        };
+    }
+
+    generateSpellingQuestion() {
+        const vocab = [...this.unitData.vocabulary].filter(v => v.en.length >= 3);
+        if (vocab.length === 0) return this.generateVocabQuestion();
+
+        const correct = vocab[Phaser.Math.Between(0, vocab.length - 1)];
+        const word = correct.en;
+        const letters = word.split('');
+
+        // Hide 30-50% of letters (at least 1, at most all but 2)
+        const numToHide = Math.max(1, Math.min(Math.floor(word.length * 0.5), Math.floor(word.length * 0.3)));
+        const numHide = Phaser.Math.Between(Math.max(1, Math.floor(word.length * 0.3)), Math.max(1, Math.floor(word.length * 0.5)));
+
+        // Pick random positions to hide (prefer consonants, avoid first letter being hidden)
+        const hideable = letters.map((l, i) => ({ letter: l, index: i }))
+            .filter(item => item.index > 0); // keep first letter visible as hint
+        const shuffled = hideable.sort(() => Math.random() - 0.5);
+        const toHide = shuffled.slice(0, Math.min(numHide, hideable.length));
+        const hideIndices = new Set(toHide.map(h => h.index));
+
+        // Build letter blanks
+        const blanks = letters.map((l, i) => ({
+            letter: l,
+            hidden: hideIndices.has(i),
+            filled: hideIndices.has(i) ? '' : l
+        }));
+
+        // Collect hidden letters as the correct answer
+        const hiddenLetters = toHide.map(h => h.letter);
+
+        // Generate distractor letters from other vocab words
+        const otherWords = [...this.unitData.vocabulary]
+            .filter(v => v.en !== word)
+            .sort(() => Math.random() - 0.5);
+        const distractors = [];
+        for (const ow of otherWords) {
+            for (const ch of ow.en.toLowerCase()) {
+                if (!hiddenLetters.includes(ch) && !distractors.includes(ch) && /[a-z]/.test(ch)) {
+                    distractors.push(ch);
+                    if (distractors.length >= hiddenLetters.length + 3) break;
+                }
+            }
+            if (distractors.length >= hiddenLetters.length + 3) break;
+        }
+
+        // All letter choices = hidden letters + extra distractors (ensure all hidden letters are included)
+        const allChoices = [...new Set([...hiddenLetters, ...distractors])];
+        // Ensure at least 6 choices and ALL hidden letters are present
+        let finalChoices = [...hiddenLetters];
+        const extraChoices = allChoices.filter(c => !hiddenLetters.includes(c))
+            .sort(() => Math.random() - 0.5);
+        finalChoices.push(...extraChoices.slice(0, Math.max(0, 6 - hiddenLetters.length)));
+        finalChoices = [...new Set(finalChoices)].sort(() => Math.random() - 0.5);
+
+        // Build display text: "d _ c t _ r"
+        const displayWord = blanks.map(b => b.hidden ? '_' : b.letter).join(' ');
+        const correctBlanks = blanks.map(b => b.hidden ? b.letter : '').join('');
+
+        return {
+            type: 'spelling',
+            question: `补全单词：${displayWord}`,
+            questionSub: `${correct.cn}  /${correct.phonetic}/`,
+            hint: '听发音，选择正确的字母补全单词',
+            choices: finalChoices,
+            correctIndex: -1, // special: multiple blanks, answer is the completed word
+            correctAnswer: word,
+            correctBlanks: hiddenLetters,
+            blanks: blanks,
+            displayWord: displayWord,
+            audioText: word,
+            explain: `${word} = ${correct.cn}`,
+            isReview: false
+        };
+    }
+
+    generateClozeQuestion() {
+        const sentences = this.unitData.sentences;
+        if (!sentences || sentences.length === 0) return this.generateVocabQuestion();
+        const vocab = this.unitData.vocabulary;
+
+        // Pick a sentence and find a content word that exists in unit vocab
+        const sentence = sentences[Phaser.Math.Between(0, sentences.length - 1)];
+        const words = sentence.en.split(/\s+/);
+        const vocabWords = new Set(vocab.map(v => v.en.toLowerCase()));
+        const contentWords = [];
+
+        words.forEach((w, i) => {
+            const clean = w.replace(/[.,!?;:'"]/g, '').toLowerCase();
+            if (vocabWords.has(clean) && clean.length > 1) {
+                contentWords.push({ word: w, clean: clean, index: i });
+            }
+        });
+
+        if (contentWords.length === 0) {
+            // Fallback: pick any non-trivial word not in stop-words
+            const stopWords = ['a', 'an', 'the', 'is', 'are', 'am', 'was', 'were',
+                'in', 'on', 'at', 'to', 'for', 'of', 'with', 'and', 'or', 'but',
+                'it', 'this', 'that', 'he', 'she', 'they', 'we', 'you', 'I', 'my',
+                'do', 'does', 'did', 'can', 'will', 'not', 'no', 'yes', 'has', 'have'];
+            words.forEach((w, i) => {
+                const clean = w.replace(/[.,!?;:'"]/g, '').toLowerCase();
+                if (!stopWords.includes(clean) && clean.length > 1) {
+                    contentWords.push({ word: w, clean: clean, index: i });
+                }
+            });
+        }
+
+        if (contentWords.length === 0) return this.generateVocabQuestion();
+
+        const picked = contentWords[Phaser.Math.Between(0, contentWords.length - 1)];
+        const blankWord = picked.clean;
+        const cleanWord = picked.word.replace(/[.,!?;:'"]/g, '');
+
+        // Find matching vocab entry
+        const correctVocab = vocab.find(v => v.en.toLowerCase() === blankWord);
+
+        // Build sentence with blank
+        const sentenceWithBlank = words.map((w, i) =>
+            i === picked.index ? '________' : w
+        ).join(' ');
+
+        // Generate wrong options from unit vocabulary
+        const wrongs = vocab
+            .filter(v => v.en.toLowerCase() !== blankWord)
+            .sort(() => Math.random() - 0.5)
+            .slice(0, 3);
+
+        const choices = [correctVocab || { en: cleanWord, cn: '' }, ...wrongs]
+            .sort(() => Math.random() - 0.5);
+        const correctIndex = choices.findIndex(c => c.en.toLowerCase() === blankWord);
+
+        return {
+            type: 'cloze',
+            question: sentenceWithBlank,
+            questionSub: `句子意思：${sentence.cn}`,
+            hint: '选择正确的单词填入空白处',
+            choices: choices.map(c => c.en),
+            correctIndex: correctIndex,
+            correctAnswer: cleanWord,
+            audioText: sentence.en,
+            explain: `完整句子：${sentence.en}\n${sentence.cn}`,
             isReview: false
         };
     }
