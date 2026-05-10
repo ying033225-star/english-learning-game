@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Build game-bundle.html from source files"""
+"""Build game-bundle.html from source files. Run from games/english-adventure/ or project root."""
 import os
 
-os.chdir("/Users/ly/cc-test")
+# Set cwd to the game directory (where this script lives)
+GAME_DIR = os.path.dirname(os.path.abspath(__file__))
+os.chdir(GAME_DIR)
 
 VERSION = "v17"
 

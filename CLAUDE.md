@@ -30,27 +30,46 @@
 - 雅思工具：简洁专业，信息密度高
 - MD 教学：互动性强，步骤清晰
 
-# 子项目
+# 项目结构
 
-## 英语大冒险 (`/Users/ly/cc-test`)
+```
+cc-test/
+├── CLAUDE.md                 ← 全局规则（本文件）
+├── content/                  ← 所有题库内容
+│   ├── grade4/               ← 四年级英语（PDF + 提取 txt）
+│   ├── ielts/                ← 雅思（待填充）
+│   └── markdown/             ← MD教学（待填充）
+├── games/                    ← 所有游戏
+│   ├── english-adventure/    ← 英语闯关游戏（当前活跃）
+│   ├── ielts-trainer/        ← 雅思训练工具（待开发）
+│   └── md-interactive/       ← MD互动教学（待开发）
+└── shared/                   ← 跨项目公用代码（待填充）
+```
 
-Mario 风格 2D 平台英语学习游戏。Phaser 3.60，纯静态 HTML+JS。
+# 子项目：英语大冒险
 
-- **入口**：`index.html`（开发）/ `game-bundle.html`（单文件分发）
-- **构建**：`python3 build_bundle.py`
+`games/english-adventure/` — Mario 风格 2D 平台英语学习游戏。Phaser 3.60，纯静态 HTML+JS。
+
+- **入口**：`games/english-adventure/index.html`（开发）/ `game-bundle.html`（单文件分发）
+- **构建**：`python3 games/english-adventure/build_bundle.py`
 - **测试**：Playwright 内置 Chromium，测试脚本 `test_*.js` 已 gitignore
 - **仓库**：https://github.com/ying033225-star/english-learning-game
 
 ### 架构
 
 ```
-js/
-  boot.js              — Phaser.Game 配置
-  data/units.js        — 6 单元词汇/句型/语法/语音
-  data/levels.js       — 24 关布局
-  scenes/              — 6 个场景（Boot/Menu/WorldSelect/Game/QuestionUI/Result）
-  entities/            — Player, QuestionBlock, Coin, Enemy(4种), Boss
-  systems/             — QuizManager(7种题型), AudioManager(TTS+跟读), ProgressManager
+games/english-adventure/
+  js/
+    boot.js           — Phaser.Game 配置
+    data/units.js     — 6 单元词汇/句型/语法/语音
+    data/levels.js    — 24 关布局
+    scenes/           — 6 个场景（Boot/Menu/WorldSelect/Game/QuestionUI/Result）
+    entities/         — Player, QuestionBlock, Coin, Enemy(4种), Boss
+    systems/          — QuizManager(7种题型), AudioManager(TTS+跟读), ProgressManager
+  css/
+  index.html          — 开发入口
+  game-bundle.html    — 单文件构建产物
+  build_bundle.py     — 构建脚本
 ```
 
 ### 7 种题型轮换

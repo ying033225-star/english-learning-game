@@ -1,6 +1,14 @@
-"""Extract text from all 4 PDFs using pdfplumber"""
+"""Extract text from all 4 PDFs using pdfplumber.
+
+PDFs are in content/grade4/ (relative to project root).
+Run from project root: python3 games/english-adventure/extract_pdfs.py
+"""
 import pdfplumber
 import os
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CONTENT = os.path.join(PROJECT_ROOT, "content", "grade4")
+os.chdir(CONTENT)
 
 pdfs = [
     "新外研四下-单元重点知识总结.pdf",
@@ -8,8 +16,6 @@ pdfs = [
     "新外研四下英语课堂笔记.pdf",
     "新外研英语四下课文逐句翻译.pdf",
 ]
-
-os.chdir("/Users/ly/cc-test")
 
 for pdf_name in pdfs:
     txt_name = pdf_name.replace(".pdf", ".txt")
@@ -34,7 +40,6 @@ for pdf_name in pdfs:
                     if (i + 1) % 10 == 0:
                         print(f"  Processed {i+1}/{total_pages} pages...")
 
-            # Check file size
             size_kb = os.path.getsize(txt_name) / 1024
             print(f"  Done! Output: {txt_name} ({size_kb:.1f} KB)")
 
